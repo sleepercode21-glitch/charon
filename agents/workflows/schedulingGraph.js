@@ -479,6 +479,17 @@ function responsePayload(state) {
     });
 }
 
+function sanitizeReply(reply) {
+    return String(reply || '')
+        .replace(/@\d{5,}(?:@\S+)?/g, 'sir')
+        .replace(/\b\d{5,}@(c\.us|lid|s\.whatsapp\.net)\b/g, 'sir')
+        .replace(/\bsir\s+sir\b/gi, 'sir')
+        .replace(/\s+([,.;!?])/g, '$1')
+        .replace(/([,.;!?])([^\s])/g, '$1 $2')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
 function fallbackReply(state) {
     const result = state.actionResult || {};
     const plan = state.plan || {};
@@ -657,7 +668,7 @@ function createSchedulingGraph({ messageStore }) {
 
     async function respondNode(state) {
         if (String(state.plan?.source || '').startsWith('command')) {
-            const reply = fallbackReply(state);
+            const reply = sanitizeReply(fallbackReply(state));
             logJson('Final command reply', reply);
             return { reply, nextStep: 'end' };
         }
@@ -676,12 +687,12 @@ function createSchedulingGraph({ messageStore }) {
             logJson('Response raw', response.content);
 
             const parsed = safeJson(response.content);
-            const reply = String(parsed?.reply || '').trim() || fallbackReply(state);
+            const reply = sanitizeReply(String(parsed?.reply || '').trim() || fallbackReply(state));
             logJson('Final reply', reply);
             return { reply, nextStep: 'end' };
         } catch (error) {
             logger.warn('Response writer failed; using fallback reply.', error);
-            return { reply: fallbackReply(state), nextStep: 'end' };
+            return { reply: sanitizeReply(fallbackReply(state)), nextStep: 'end' };
         }
     }
 
