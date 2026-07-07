@@ -152,10 +152,24 @@ function startHealthServer() {
 
 function puppeteerExecutablePath() {
     const configuredPath = process.env.PUPPETEER_EXECUTABLE_PATH;
-    if (!configuredPath) return undefined;
-    if (fs.existsSync(configuredPath)) return configuredPath;
+    const fallbackPaths = [
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/google-chrome',
+    ];
 
-    logger.warn(`Ignoring PUPPETEER_EXECUTABLE_PATH because it does not exist: ${configuredPath}`);
+    if (configuredPath && fs.existsSync(configuredPath)) return configuredPath;
+
+    if (configuredPath) {
+        logger.warn(`Ignoring PUPPETEER_EXECUTABLE_PATH because it does not exist: ${configuredPath}`);
+        delete process.env.PUPPETEER_EXECUTABLE_PATH;
+    }
+
+    const fallbackPath = fallbackPaths.find((candidate) => fs.existsSync(candidate));
+    if (fallbackPath) return fallbackPath;
+
+    logger.warn('No Chromium executable found in known paths; letting Puppeteer resolve the browser.');
     return undefined;
 }
 
