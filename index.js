@@ -159,6 +159,54 @@ function puppeteerExecutablePath() {
     return undefined;
 }
 
+function puppeteerHeadlessMode() {
+    const value = (process.env.PUPPETEER_HEADLESS || 'new').trim().toLowerCase();
+    if (value === 'false') return false;
+    if (value === 'true') return true;
+    return 'new';
+}
+
+function extraPuppeteerArgs() {
+    if (!process.env.PUPPETEER_EXTRA_ARGS) return [];
+    return process.env.PUPPETEER_EXTRA_ARGS
+        .split(/\s+/)
+        .map((arg) => arg.trim())
+        .filter(Boolean);
+}
+
+function puppeteerArgs() {
+    return [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--disable-background-networking',
+        '--disable-breakpad',
+        '--disable-crashpad',
+        '--disable-crash-reporter',
+        '--disable-dev-tools',
+        '--disable-extensions',
+        '--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints',
+        '--disable-gpu',
+        '--disable-ipc-flooding-protection',
+        '--disable-seccomp-filter-sandbox',
+        '--disable-session-crashed-bubble',
+        '--disable-software-rasterizer',
+        '--disable-sync',
+        '--disable-zygote',
+        '--disk-cache-dir=/tmp/chromium-cache',
+        '--hide-scrollbars',
+        '--metrics-recording-only',
+        '--mute-audio',
+        '--no-default-browser-check',
+        '--no-first-run',
+        '--no-zygote',
+        '--password-store=basic',
+        '--use-mock-keychain',
+        ...extraPuppeteerArgs(),
+    ];
+}
+
 async function storeMessage(message, chat) {
     if (!messageStore) return null;
 
@@ -299,37 +347,10 @@ async function main() {
             backupSyncIntervalMs: 300000,
         }),
         puppeteer: {
-            headless: true,
+            headless: puppeteerHeadlessMode(),
             executablePath: puppeteerExecutablePath(),
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--disable-background-networking',
-                '--disable-breakpad',
-                '--disable-crashpad',
-                '--disable-crash-reporter',
-                '--disable-dev-tools',
-                '--disable-extensions',
-                '--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints',
-                '--disable-gpu',
-                '--disable-ipc-flooding-protection',
-                '--disable-seccomp-filter-sandbox',
-                '--disable-session-crashed-bubble',
-                '--disable-software-rasterizer',
-                '--disable-sync',
-                '--disable-zygote',
-                '--disk-cache-dir=/tmp/chromium-cache',
-                '--hide-scrollbars',
-                '--metrics-recording-only',
-                '--mute-audio',
-                '--no-first-run',
-                '--no-default-browser-check',
-                '--no-zygote',
-                '--password-store=basic',
-                '--use-mock-keychain',
-            ],
+            protocolTimeout: Number(process.env.PUPPETEER_PROTOCOL_TIMEOUT_MS || 120000),
+            args: puppeteerArgs(),
         },
     });
     whatsappClient = client;
