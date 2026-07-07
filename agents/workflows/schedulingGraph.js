@@ -19,12 +19,37 @@ const { updateActiveItem } = require('../tools/update');
 const ACTION_INTENTS = new Set(['schedule', 'reminder', 'update', 'cancel', 'complete', 'list', 'announce']);
 const KNOWN_INTENTS = new Set([...ACTION_INTENTS, 'answer', 'refuse']);
 
+const COMMAND_TIME_FORMAT = 'MM/DD/YY HH:MM Area/City';
+const COMMAND_SCHEDULE_USAGE = `/create schedule | Title | ${COMMAND_TIME_FORMAT}`;
+const COMMAND_REMINDER_USAGE = `/create reminder | Text | ${COMMAND_TIME_FORMAT}`;
+const COMMAND_SCHEDULE_EXAMPLE = '/create schedule | Banking system design | 07/09/26 20:00 America/Chicago';
+const COMMAND_REMINDER_EXAMPLE = '/create reminder | Submit slides | 07/09/26 18:30 Asia/Kolkata';
 const COMMAND_HELP = [
-    'Schedule commands, sir:',
-    '/create schedule | Title | tomorrow 2pm EST',
+    'Charon command mode, sir:',
+    '',
+    'Create',
+    COMMAND_SCHEDULE_USAGE,
+    COMMAND_REMINDER_USAGE,
+    '',
+    'Examples',
+    COMMAND_SCHEDULE_EXAMPLE,
+    COMMAND_REMINDER_EXAMPLE,
+    '',
+    'List',
     '/list schedules',
+    '/list reminders',
+    '/list all',
+    '',
+    'Cancel',
     '/cancel schedule <id>',
+    '/cancel reminder <id>',
+    '/cancel all',
+    '',
+    'Help',
     '/help',
+    '',
+    'Time must be concrete:',
+    COMMAND_TIME_FORMAT,
 ].join('\n');
 
 const CharonState = Annotation.Root({
@@ -110,14 +135,34 @@ function cleanCommandText(value) {
         .trim();
 }
 
-function splitLooseWhen(value) {
+function commandCreateUsageReply(kind = 'schedule') {
+    if (kind === 'reminder') {
+        return `Use: ${COMMAND_REMINDER_USAGE}\nExample: ${COMMAND_REMINDER_EXAMPLE}`;
+    }
+
+    return `Use: ${COMMAND_SCHEDULE_USAGE}\nExample: ${COMMAND_SCHEDULE_EXAMPLE}`;
+}
+
+function parseConcreteCommandWhen(value) {
     const text = String(value || '').trim();
-    const match = text.match(/\s+(?:at|on|for|to|in|by|around)\s+(.+)$/i);
-    if (!match) return [text, ''];
-    return [
-        text.slice(0, match.index).trim(),
-        match[1].trim(),
-    ];
+    const match = text.match(/^(\d{2})\/(\d{2})\/(\d{2}|\d{4})\s+([01]\d|2[0-3]):([0-5]\d)\s+([A-Za-z_+-]+(?:\/[A-Za-z0-9_+-]+)+|UTC)$/);
+    if (!match) return null;
+
+    const [, month, day, year, hour, minute, timezoneText] = match;
+    const fullYear = year.length === 2 ? 2000 + Number(year) : Number(year);
+    const date = new Date(Date.UTC(fullYear, Number(month) - 1, Number(day), Number(hour), Number(minute)));
+    const isValidDate = date.getUTCFullYear() === fullYear
+        && date.getUTCMonth() === Number(month) - 1
+        && date.getUTCDate() === Number(day);
+    const timezone = normalizeTimezone(timezoneText, null);
+
+    if (!isValidDate || !timezone) return null;
+
+    return {
+        date: `${month}/${day}/${year}`,
+        time: `${hour}:${minute}`,
+        timezone,
+    };
 }
 
 function parseCommandPlan(rawText) {
@@ -136,78 +181,104 @@ function parseCommandPlan(rawText) {
     }
 
     if (command === 'create') {
-        const createMatch = tail.match(/^schedule(?:s)?\b\s*([\s\S]*)$/i);
+        const createMatch = tail.match(/^(schedule(?:s)?|reminder(?:s)?)\b\s*([\s\S]*)$/i);
         if (!createMatch) {
             return {
                 intent: 'answer',
-                reply: `Use /create schedule, sir.\n${COMMAND_HELP}`,
+                reply: `Use /create schedule or /create reminder, sir.\n\n${COMMAND_HELP}`,
                 source: 'command',
             };
         }
 
-        const args = createMatch[1].trim();
-        let title = '';
-        let when = '';
-        const parts = args.split('|').map((part) => part.trim()).filter(Boolean);
-        if (parts.length >= 2) {
-            [title, when] = parts;
-        } else {
-            [title, when] = splitLooseWhen(args);
+        const createKind = /^reminder/i.test(createMatch[1]) ? 'reminder' : 'schedule';
+        const parts = createMatch[2].split('|').map((part) => part.trim()).filter(Boolean);
+        const title = parts[0] || '';
+        const whenInput = parts.length >= 4 ? `${parts[1]} ${parts[2]} ${parts[3]}` : parts[1] || '';
+        const parsedWhen = parseConcreteCommandWhen(whenInput);
+
+        if (!title || !parsedWhen) {
+            return {
+                intent: 'answer',
+                reply: commandCreateUsageReply(createKind),
+                source: 'command',
+            };
+        }
+
+        if (createKind === 'reminder') {
+            return {
+                intent: 'reminder',
+                text: title,
+                date: parsedWhen.date,
+                time: parsedWhen.time,
+                timezone: parsedWhen.timezone,
+                source: 'command',
+                ask: '',
+            };
         }
 
         return {
             intent: 'schedule',
-            title: title || 'Meet scheduling',
-            text: title || 'Scheduled from command mode.',
-            time: when || '',
-            timezone: extractTimezone(`${when} ${args}`, settings.timezone),
+            title,
+            text: title,
+            date: parsedWhen.date,
+            time: parsedWhen.time,
+            timezone: parsedWhen.timezone,
             source: 'command',
-            ask: title && when ? '' : 'Use: /create schedule | Title | tomorrow 2pm EST',
+            ask: '',
         };
     }
 
     if (command === 'list') {
-        if (!/^schedules?\b/i.test(tail)) {
+        const listMatch = tail.match(/^(schedules?|meetings?|sessions?|reminders?|all)\b/i);
+        if (!listMatch) {
             return {
                 intent: 'answer',
-                reply: `Use /list schedules, sir.\n${COMMAND_HELP}`,
+                reply: `Use /list schedules, /list reminders, or /list all, sir.\n\n${COMMAND_HELP}`,
                 source: 'command',
             };
         }
 
+        const listKindText = listMatch[1].toLowerCase();
         return {
             intent: 'list',
-            kind: 'meeting',
+            kind: listKindText === 'all'
+                ? ''
+                : normalizedKind(listKindText, listKindText),
             target: tail,
             source: 'command',
         };
     }
 
     if (command === 'cancel') {
-        const cancelMatch = tail.match(/^schedule(?:s)?\b\s*([\s\S]*)$/i);
+        const cancelMatch = tail.match(/^(schedule(?:s)?|meeting(?:s)?|session(?:s)?|reminder(?:s)?|all)\b\s*([\s\S]*)$/i);
         if (!cancelMatch) {
             return {
                 intent: 'answer',
-                reply: `Use /cancel schedule <id>, sir.\n${COMMAND_HELP}`,
+                reply: `Use /cancel schedule <id>, /cancel reminder <id>, or /cancel all, sir.\n\n${COMMAND_HELP}`,
                 source: 'command',
             };
         }
 
-        const target = cancelMatch[1].trim();
-        if (!target) {
+        const cancelKindText = cancelMatch[1].toLowerCase();
+        const target = cancelMatch[2].trim();
+        const kind = cancelKindText === 'all'
+            ? ''
+            : normalizedKind(cancelKindText, cancelKindText);
+
+        if (!target && cancelKindText !== 'all') {
             return {
                 intent: 'answer',
-                reply: `Give me the schedule id, sir.\nUse /list schedules, then /cancel schedule <id>.`,
+                reply: `Give me the id, sir.\nUse /list schedules or /list reminders first.`,
                 source: 'command',
             };
         }
 
         return {
             intent: 'cancel',
-            kind: 'meeting',
+            kind,
             target,
             source: 'command',
-            reply: target ? '' : `Use /cancel schedule <id>, sir.\n${COMMAND_HELP}`,
+            reply: '',
         };
     }
 
@@ -231,7 +302,7 @@ function normalizedIntent(value) {
 
 function normalizedKind(value, text = '') {
     const raw = String(value || '').toLowerCase();
-    if (['meeting', 'meetings', 'meet', 'session', 'sessions'].includes(raw)) return 'meeting';
+    if (['meeting', 'meetings', 'meet', 'schedule', 'schedules', 'session', 'sessions'].includes(raw)) return 'meeting';
     if (['reminder', 'reminders'].includes(raw)) return 'reminder';
     if (['all', 'both', 'everything', ''].includes(raw)) {
         const body = String(text || '').toLowerCase();
@@ -520,8 +591,22 @@ function fallbackReply(state) {
 
     if (result.status === 'updated') return `Updated ${result.label || 'it'}, sir${result.when ? `: ${result.when}` : ''}.`;
     if (result.status === 'completed') return `Marked ${result.label || 'it'} done, sir.`;
-    if (result.status === 'listed') return `Active schedules, sir:\n${(result.lines || []).join('\n')}`;
-    if (result.status === 'empty') return 'No active schedules found, sir.';
+    if (result.status === 'listed') {
+        const label = result.kind === 'reminder'
+            ? 'Active reminders'
+            : result.kind === 'meeting'
+                ? 'Active schedules'
+                : 'Active items';
+        return `${label}, sir:\n${(result.lines || []).join('\n')}`;
+    }
+    if (result.status === 'empty') {
+        const label = result.kind === 'reminder'
+            ? 'reminders'
+            : result.kind === 'meeting'
+                ? 'schedules'
+                : 'items';
+        return `No active ${label} found, sir.`;
+    }
     if (result.status === 'announced') return 'Tagged everyone, sir.';
     if (result.status === 'nothing_to_cancel') return 'Nothing active matched, sir.';
     if (result.status === 'failed' && result.reason) return `I could not finish that, sir: ${result.reason}`;
