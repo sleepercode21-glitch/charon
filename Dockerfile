@@ -1,4 +1,4 @@
-FROM node:20-bookworm-slim
+FROM node:20-bullseye-slim
 
 ENV NODE_ENV=production \
     PORT=3000 \
