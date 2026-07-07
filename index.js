@@ -202,6 +202,8 @@ function puppeteerArgs() {
         '--no-first-run',
         '--no-zygote',
         '--password-store=basic',
+        '--remote-debugging-pipe',
+        '--user-data-dir=/tmp/chrome-user-data',
         '--use-mock-keychain',
         ...extraPuppeteerArgs(),
     ];
