@@ -216,7 +216,6 @@ function puppeteerArgs() {
         '--no-first-run',
         '--no-zygote',
         '--password-store=basic',
-        '--remote-debugging-pipe',
         '--user-data-dir=/tmp/chrome-user-data',
         '--use-mock-keychain',
         ...extraPuppeteerArgs(),
@@ -365,6 +364,7 @@ async function main() {
         puppeteer: {
             headless: puppeteerHeadlessMode(),
             executablePath: puppeteerExecutablePath(),
+            dumpio: process.env.PUPPETEER_DUMPIO === 'true',
             protocolTimeout: Number(process.env.PUPPETEER_PROTOCOL_TIMEOUT_MS || 120000),
             args: puppeteerArgs(),
         },
