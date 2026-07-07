@@ -90,11 +90,12 @@ function uniqueItems(items) {
 }
 
 function looksLikeId(value) {
-    return /^[a-f0-9]{4,24}$/i.test(String(value || '').trim());
+    return /[a-f0-9]{4,24}/i.test(String(value || '').trim());
 }
 
 function idMatches(item, query) {
-    const needle = String(query || '').trim().toLowerCase();
+    const match = String(query || '').trim().match(/[a-f0-9]{4,24}/i);
+    const needle = match ? match[0].toLowerCase() : '';
     const id = String(item?.item?._id || '').toLowerCase();
     return Boolean(needle && id && (id === needle || id.startsWith(needle) || id.endsWith(needle)));
 }

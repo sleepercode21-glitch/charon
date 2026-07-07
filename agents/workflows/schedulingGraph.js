@@ -18,6 +18,8 @@ const { updateActiveItem } = require('../tools/update');
 
 const ACTION_INTENTS = new Set(['schedule', 'reminder', 'update', 'cancel', 'complete', 'list', 'announce']);
 const KNOWN_INTENTS = new Set([...ACTION_INTENTS, 'answer', 'refuse']);
+const DB_TOOL_NAMES = new Set(['list_active_items', 'get_active_item']);
+const MAX_DB_TOOL_STEPS = 3;
 
 const COMMAND_TIME_FORMAT = 'MM/DD/YY HH:MM Area/City';
 const COMMAND_SCHEDULE_USAGE = `/create schedule | Title | ${COMMAND_TIME_FORMAT}`;
@@ -315,6 +317,79 @@ function normalizedKind(value, text = '') {
     return null;
 }
 
+function normalizedToolKind(value) {
+    const kind = normalizedKind(value, value);
+    return kind || '';
+}
+
+function shortId(value) {
+    return String(value || '').slice(-6);
+}
+
+function trimText(value, max = 180) {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+
+function inferPendingKind(text) {
+    const value = String(text || '').toLowerCase();
+    if (/\breminders?\b/.test(value)) return 'reminder';
+    if (/\b(meetings?|meets?|sessions?|schedules?)\b/.test(value)) return 'meeting';
+    if (/\b(cancel|delete|clear|remove)\b/.test(value)) return 'cancel';
+    if (/\b(move|reschedule|update|change)\b/.test(value)) return 'update';
+    return '';
+}
+
+function pendingClarification(context, message) {
+    const messages = withoutCurrentMessage(context, message).messages || [];
+    const askIndex = [...messages].reverse().findIndex((item) => {
+        if (!item.isFromMe) return false;
+        const body = String(item.body || '').toLowerCase();
+        return body.includes('?')
+            || /\b(need|provide|confirm|which|what|when|date|time|timezone|time zone|id|title)\b/.test(body);
+    });
+
+    if (askIndex < 0) return null;
+
+    const actualIndex = messages.length - 1 - askIndex;
+    const ask = messages[actualIndex];
+    const newerBotAnswer = messages.slice(actualIndex + 1).some((item) => item.isFromMe);
+    if (newerBotAnswer) return null;
+
+    const priorUser = [...messages.slice(0, actualIndex)].reverse().find((item) => !item.isFromMe);
+    const combined = `${priorUser?.body || ''} ${ask.body || ''}`;
+
+    return {
+        kind: inferPendingKind(combined),
+        asked: trimText(ask.body, 150),
+        about: trimText(priorUser?.body || '', 180),
+    };
+}
+
+function dbItemSummary(active) {
+    const item = active.item || {};
+    if (active.type === 'meeting') {
+        return {
+            id: shortId(item._id),
+            kind: 'meeting',
+            title: item.title || 'Meeting',
+            when: item.start ? new Date(item.start).toISOString() : '',
+            timezone: item.timezone || settings.timezone,
+            meetLink: item.meetLink || '',
+            status: item.status || '',
+        };
+    }
+
+    return {
+        id: shortId(item._id),
+        kind: 'reminder',
+        text: item.text || 'Reminder',
+        when: item.dueAt ? new Date(item.dueAt).toISOString() : '',
+        timezone: item.timezone || settings.timezone,
+        status: item.status || '',
+    };
+}
+
 function compactForPlanner(context, message) {
     return compactContext(withoutCurrentMessage(context, message), {
         maxTokens: settings.llm.contextTokenBudget,
@@ -338,6 +413,7 @@ function plannerPayload({ input, context }) {
         defaultTz: input.timezone,
         requester: input.storedMessage?.senderName || message.author || message.from || 'unknown',
         msg: body,
+        pending: pendingClarification(context, message),
         ctx: JSON.parse(compact.json),
         budget: {
             ctxTokens: compact.estimatedTokens,
@@ -346,18 +422,94 @@ function plannerPayload({ input, context }) {
     });
 }
 
+function plannerLoopPayload({ input, context, dbResults }) {
+    const base = JSON.parse(plannerPayload({ input, context }));
+    return JSON.stringify({
+        ...base,
+        db: dbResults,
+        tools: [
+            {
+                name: 'list_active_items',
+                args: {
+                    kind: 'meeting|reminder|all|',
+                    target: 'optional id/title/search text',
+                    limit: '1-5',
+                },
+            },
+            {
+                name: 'get_active_item',
+                args: {
+                    kind: 'meeting|reminder|all|',
+                    target: 'required id/title/search text',
+                },
+            },
+        ],
+    });
+}
+
+async function runPlannerDbTool({ toolCall, chatId: id, messageStore }) {
+    const tool = String(toolCall?.tool || '');
+    const args = toolCall?.args || {};
+    if (!DB_TOOL_NAMES.has(tool)) {
+        return {
+            tool,
+            ok: false,
+            error: 'unknown_db_tool',
+        };
+    }
+
+    const kind = normalizedToolKind(args.kind);
+    const target = String(args.target || '').trim();
+    const requestedLimit = Number(args.limit);
+    const limit = tool === 'get_active_item'
+        ? 1
+        : Number.isInteger(requestedLimit) && requestedLimit > 0
+            ? Math.min(requestedLimit, 5)
+            : 5;
+
+    if (tool === 'get_active_item' && !target) {
+        return {
+            tool,
+            ok: false,
+            error: 'target_required',
+        };
+    }
+
+    const items = await messageStore.findActiveItems({
+        chatId: id,
+        kind,
+        target: target || null,
+        limit,
+    });
+
+    return {
+        tool,
+        ok: true,
+        args: {
+            kind: kind || 'all',
+            target,
+            limit,
+        },
+        count: items.length,
+        items: items.slice(0, limit).map(dbItemSummary),
+    };
+}
+
 function hasTimeRequest(plan) {
     return Boolean(plan.date || plan.time);
 }
 
-function whenText(plan) {
+function whenText(plan, fallbackText = '') {
     if (!plan.date && !plan.time) return '';
     return [plan.date, plan.time, plan.timezone].filter(Boolean).join(' ').trim();
 }
 
 function timeResolutionForPlan(plan, body) {
     const intent = normalizedIntent(plan.intent);
-    const when = whenText(plan);
+    let when = whenText(plan);
+    if (!when && ACTION_INTENTS.has(intent)) {
+        when = String(body || '');
+    }
     const timezone = normalizeTimezone(plan.timezone, extractTimezone(`${when} ${body}`, settings.timezone));
     const parsed = when ? parseDate(when, new Date(), timezone) : null;
 
@@ -561,6 +713,24 @@ function sanitizeReply(reply) {
         .trim();
 }
 
+function inventedOperationalReply(state, reply) {
+    if (state.actionResult?.status) return false;
+    if (state.decision?.intent !== 'answer' && state.decision?.intent !== 'refuse') return false;
+
+    const text = String(reply || '').toLowerCase();
+    return /\b(booked|scheduled|cancelled|canceled|updated|rescheduled|reminder set|schedule id|meet link)\b/.test(text)
+        || /\b(12345|abc123|your-meet-link)\b/.test(text)
+        || /https?:\/\/meet\.google\.com\/(your|abc|example)/i.test(reply);
+}
+
+function safeReplyForState(state, reply) {
+    const clean = sanitizeReply(reply);
+    if (!inventedOperationalReply(state, clean)) return clean;
+
+    const body = messageText(state.input.message);
+    return sanitizeReply(`I should not fake that, sir. If you want action, tell me plainly what to schedule, list, cancel, or update. Current ask: ${trimText(body, 120)}`);
+}
+
 function fallbackReply(state) {
     const result = state.actionResult || {};
     const plan = state.plan || {};
@@ -582,7 +752,7 @@ function fallbackReply(state) {
     }
 
     if (result.status === 'scheduled' && result.type === 'reminder') {
-        return `Noted, sir. I'll remind the group: ${result.text} (${result.when}).`;
+        return `Reminder set, sir: ${result.text} [${result.id || 'new'}] at ${result.when}.`;
     }
 
     if (result.status === 'cancelled') {
@@ -609,9 +779,27 @@ function fallbackReply(state) {
     }
     if (result.status === 'announced') return 'Tagged everyone, sir.';
     if (result.status === 'nothing_to_cancel') return 'Nothing active matched, sir.';
-    if (result.status === 'failed' && result.reason) return `I could not finish that, sir: ${result.reason}`;
+    if (result.status === 'failed') {
+        if (result.need === 'meeting_time') return 'I need the meeting date, time, and timezone, sir.';
+        if (result.need === 'reminder_time') return 'I need the reminder date, time, and timezone, sir.';
+        if (result.need === 'new_time' || result.need === 'new_meeting_time' || result.need === 'new_reminder_time') {
+            return 'I need the new date, time, and timezone, sir.';
+        }
+        if (result.reason === 'no_matching_active_item') {
+            return 'I could not find that active item, sir. Use /list all and send me the id.';
+        }
+        if (result.reason === 'no_active_item') {
+            return 'I do not see an active item to update, sir.';
+        }
+        return `I could not finish that, sir${result.reason ? `: ${result.reason}` : '.'}`;
+    }
 
     return 'Done, sir.';
+}
+
+function shouldUseDeterministicReply(state) {
+    return ACTION_INTENTS.has(state.decision?.intent)
+        || String(state.plan?.source || '').startsWith('command');
 }
 
 function createSchedulingGraph({ messageStore }) {
@@ -661,23 +849,58 @@ function createSchedulingGraph({ messageStore }) {
 
         const id = chatId(state.input.chat);
         const context = await messageStore.recentContext(id);
-        const payload = plannerPayload({ input: state.input, context });
-        const estimated = estimateTokens(CHARON_SYSTEM_PROMPT) + estimateTokens(payload);
+        const dbResults = [];
         try {
-            const response = await model.invoke([
-                new SystemMessage(CHARON_SYSTEM_PROMPT),
-                new HumanMessage(payload),
-            ], { json: true, maxOutputTokens: settings.llm.planMaxOutputTokens });
+            for (let step = 0; step <= MAX_DB_TOOL_STEPS; step += 1) {
+                const payload = plannerLoopPayload({ input: state.input, context, dbResults });
+                const estimated = estimateTokens(CHARON_SYSTEM_PROMPT) + estimateTokens(payload);
+                const response = await model.invoke([
+                    new SystemMessage(CHARON_SYSTEM_PROMPT),
+                    new HumanMessage(payload),
+                ], { json: true, maxOutputTokens: settings.llm.planMaxOutputTokens });
 
-            logModelUsage('Plan', response, estimated);
-            logJson('Plan raw', response.content);
+                logModelUsage(`Plan step ${step + 1}`, response, estimated);
+                logJson(`Plan raw ${step + 1}`, response.content);
 
-            const parsed = safeJson(response.content) || {
-                intent: 'answer',
-                reply: 'I could not read that cleanly. Say it once more plainly.',
-            };
+                const parsed = safeJson(response.content) || {
+                    intent: 'answer',
+                    reply: 'I could not read that cleanly. Say it once more plainly.',
+                };
 
-            return stateFromPlan({ state, context, rawPlan: parsed });
+                if (parsed.tool) {
+                    if (step >= MAX_DB_TOOL_STEPS) {
+                        return stateFromPlan({
+                            state,
+                            context,
+                            rawPlan: {
+                                intent: 'answer',
+                                reply: 'I checked the database but could not settle on one safe item. Send me the schedule or reminder id.',
+                            },
+                        });
+                    }
+
+                    const toolResult = await runPlannerDbTool({
+                        toolCall: parsed,
+                        chatId: id,
+                        messageStore,
+                    });
+                    dbResults.push(toolResult);
+                    logJson('Planner DB tool result', toolResult);
+                    continue;
+                }
+
+                const finalPlan = parsed.plan || parsed.final || parsed;
+                return stateFromPlan({ state, context, rawPlan: finalPlan });
+            }
+
+            return stateFromPlan({
+                state,
+                context,
+                rawPlan: {
+                    intent: 'answer',
+                    reply: 'I checked the database but could not settle on a safe action. Try with the schedule/reminder id.',
+                },
+            });
         } catch (error) {
             logger.warn('Planner LLM failed; command mode remains available.', error);
             return stateFromPlan({
@@ -737,6 +960,7 @@ function createSchedulingGraph({ messageStore }) {
             actionResult = await listActiveItems({
                 chat: input.chat,
                 kind: decision.list?.kind,
+                target: decision.list?.target,
                 messageStore,
             });
         } else if (decision.intent === 'announce') {
@@ -752,9 +976,9 @@ function createSchedulingGraph({ messageStore }) {
     }
 
     async function respondNode(state) {
-        if (String(state.plan?.source || '').startsWith('command')) {
-            const reply = sanitizeReply(fallbackReply(state));
-            logJson('Final command reply', reply);
+        if (shouldUseDeterministicReply(state)) {
+            const reply = safeReplyForState(state, fallbackReply(state));
+            logJson('Final deterministic reply', reply);
             return { reply, nextStep: 'end' };
         }
 
@@ -772,12 +996,12 @@ function createSchedulingGraph({ messageStore }) {
             logJson('Response raw', response.content);
 
             const parsed = safeJson(response.content);
-            const reply = sanitizeReply(String(parsed?.reply || '').trim() || fallbackReply(state));
+            const reply = safeReplyForState(state, String(parsed?.reply || '').trim() || fallbackReply(state));
             logJson('Final reply', reply);
             return { reply, nextStep: 'end' };
         } catch (error) {
             logger.warn('Response writer failed; using fallback reply.', error);
-            return { reply: sanitizeReply(fallbackReply(state)), nextStep: 'end' };
+            return { reply: safeReplyForState(state, fallbackReply(state)), nextStep: 'end' };
         }
     }
 

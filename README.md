@@ -46,10 +46,20 @@ The LangGraph workflow lives in `agents/workflows/schedulingGraph.js`.
 The workflow has three main jobs:
 
 - Planner: decides whether the tagged message is chat, scheduling, reminder, update, cancel, list, completion, or announcement.
+- DB lookup loop: before acting on "last", "it", "them", active items, ids, counts, or Meet links, the planner can call safe database tools for exact state.
 - Tools: perform side effects such as creating Meet links, writing schedules, cancelling items, and listing active state.
 - Response writer: turns the tool result into a short, human WhatsApp reply.
 
 Slash commands bypass the LLM entirely. This keeps the bot useful when the Groq free tier is rate-limited.
+
+The LLM never gets raw MongoDB access. It can only request safe, scoped tools:
+
+```text
+list_active_items({ kind, target, limit })
+get_active_item({ kind, target })
+```
+
+Those tools only read active schedules/reminders for the current WhatsApp group. Create, update, cancel, complete, list, and announce actions still run through deterministic application tools after the planner has selected an exact action.
 
 ## Project Structure
 

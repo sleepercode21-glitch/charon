@@ -36,6 +36,21 @@ function targetFilter(fields, target) {
     return { $or: fields.map((field) => ({ [field]: regex })) };
 }
 
+function shortIdCandidate(value) {
+    const match = String(value || '').trim().match(/[a-f0-9]{4,24}/i);
+    return match ? match[0].toLowerCase() : '';
+}
+
+function looksLikeShortId(value) {
+    return Boolean(shortIdCandidate(value));
+}
+
+function idMatches(item, target) {
+    const needle = shortIdCandidate(target);
+    const id = String(item?._id || '').toLowerCase();
+    return Boolean(needle && id && (id === needle || id.startsWith(needle) || id.endsWith(needle)));
+}
+
 function createMessageStore({ mongoose }) {
     const WhatsAppMessage = mongoose.models.WhatsAppMessage || mongoose.model('WhatsAppMessage', new mongoose.Schema({
         messageId: { type: String, unique: true, index: true },
@@ -411,22 +426,37 @@ function createMessageStore({ mongoose }) {
 
     async function findActiveItem({ chatId, target }) {
         const now = new Date();
-        const reminderFilter = {
+        const baseReminderFilter = {
             chatId,
             status: 'pending',
-            ...targetFilter(['text'], target),
         };
-        const meetingFilter = {
+        const baseMeetingFilter = {
             chatId,
             status: { $in: ['draft', 'scheduled'] },
             start: { $gte: new Date(now.getTime() - 2 * 60 * 60 * 1000) },
+        };
+        const reminderFilter = {
+            ...baseReminderFilter,
+            ...targetFilter(['text'], target),
+        };
+        const meetingFilter = {
+            ...baseMeetingFilter,
             ...targetFilter(['title', 'description'], target),
         };
 
-        const [reminder, meeting] = await Promise.all([
+        let [reminder, meeting] = await Promise.all([
             StandaloneReminder.findOne(reminderFilter).sort({ dueAt: 1, createdAt: -1 }),
             Meeting.findOne(meetingFilter).sort({ start: 1, createdAt: -1 }),
         ]);
+
+        if (!reminder && !meeting && looksLikeShortId(target)) {
+            const [reminders, meetings] = await Promise.all([
+                StandaloneReminder.find(baseReminderFilter).sort({ dueAt: 1, createdAt: -1 }).limit(20),
+                Meeting.find(baseMeetingFilter).sort({ start: 1, createdAt: -1 }).limit(20),
+            ]);
+            reminder = reminders.find((item) => idMatches(item, target)) || null;
+            meeting = meetings.find((item) => idMatches(item, target)) || null;
+        }
 
         if (!reminder && !meeting) return null;
 
@@ -504,10 +534,31 @@ function createMessageStore({ mongoose }) {
             meetingQuery.limit(perKindLimit);
         }
 
-        const [reminders, meetings] = await Promise.all([
+        let [reminders, meetings] = await Promise.all([
             includeReminders ? reminderQuery : [],
             includeMeetings ? meetingQuery : [],
         ]);
+
+        if (target && looksLikeShortId(target) && reminders.length + meetings.length === 0) {
+            const [idReminders, idMeetings] = await Promise.all([
+                includeReminders
+                    ? StandaloneReminder.find({
+                        chatId,
+                        status: 'pending',
+                    }).sort({ dueAt: 1, createdAt: -1 }).limit(20)
+                    : [],
+                includeMeetings
+                    ? Meeting.find({
+                        chatId,
+                        status: { $in: ['draft', 'scheduled'] },
+                        start: { $gte: new Date(now.getTime() - 2 * 60 * 60 * 1000) },
+                    }).sort({ start: 1, createdAt: -1 }).limit(20)
+                    : [],
+            ]);
+
+            reminders = idReminders.filter((item) => idMatches(item, target));
+            meetings = idMeetings.filter((item) => idMatches(item, target));
+        }
 
         return [
             ...meetings.map((meeting) => ({

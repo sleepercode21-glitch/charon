@@ -27,7 +27,7 @@ async function createStandaloneReminder({ decision, timeResolution, chat, trigge
     }
 
     const text = reminder.text || reminder.title || 'Reminder';
-    await messageStore.createStandaloneReminder({
+    const reminderDoc = await messageStore.createStandaloneReminder({
         chatId: chat.id?._serialized || chat.id,
         chatName: chat.name || '',
         text,
@@ -41,6 +41,7 @@ async function createStandaloneReminder({ decision, timeResolution, chat, trigge
     return {
         status: 'scheduled',
         type: 'reminder',
+        id: String(reminderDoc._id || '').slice(-6),
         text,
         when: formatForChat(dueAt, timezone),
     };
