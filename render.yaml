@@ -1,0 +1,67 @@
+services:
+  - type: web
+    name: charon
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    autoDeployTrigger: commit
+    healthCheckPath: /health
+    maxShutdownDelaySeconds: 60
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URI
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.1-8b-instant
+      - key: GROQ_FALLBACK_MODELS
+        sync: false
+      - key: LLM_MAX_OUTPUT_TOKENS
+        value: "512"
+      - key: LLM_PLAN_MAX_OUTPUT_TOKENS
+        value: "220"
+      - key: LLM_RESPONSE_MAX_OUTPUT_TOKENS
+        value: "160"
+      - key: LLM_MAX_INPUT_TOKENS
+        value: "5000"
+      - key: LLM_CONTEXT_TOKEN_BUDGET
+        value: "1600"
+      - key: LLM_MAX_CONTEXT_MESSAGES
+        value: "12"
+      - key: LLM_MODEL_COOLDOWN_MS
+        value: "60000"
+      - key: WHATSAPP_GROUP_SCOPE
+        value: all
+      - key: WHATSAPP_GROUP_ID
+        sync: false
+      - key: WHATSAPP_GROUP_NAME
+        sync: false
+      - key: WHATSAPP_REPLY_MODE
+        value: tag_only
+      - key: WHATSAPP_HISTORY_LIMIT
+        value: "200"
+      - key: BOT_TIMEZONE
+        value: America/Phoenix
+      - key: DEFAULT_MEETING_DURATION_MINUTES
+        value: "180"
+      - key: REMINDERS_ENABLED
+        value: "true"
+      - key: REMINDER_LEAD_MINUTES
+        value: "1440,360,60,10,2,0"
+      - key: REMINDER_CHECK_INTERVAL_MS
+        value: "60000"
+      - key: GOOGLE_MEET_LINK
+        sync: false
+      - key: GOOGLE_OAUTH_CLIENT_ID
+        sync: false
+      - key: GOOGLE_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_OAUTH_REFRESH_TOKEN
+        sync: false
+      - key: GOOGLE_MEET_ACCESS_TYPE
+        value: OPEN
+      - key: GOOGLE_MEET_ENTRY_POINT_ACCESS
+        value: ALL

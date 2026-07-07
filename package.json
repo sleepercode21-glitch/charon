@@ -1,0 +1,35 @@
+{
+  "name": "charon",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "node index.js",
+    "start": "node index.js",
+    "start:pm2": "pm2 start ecosystem.config.cjs",
+    "restart:pm2": "pm2 restart charon",
+    "stop:pm2": "pm2 stop charon",
+    "logs:pm2": "pm2 logs charon",
+    "delete:pm2": "pm2 delete charon",
+    "check": "node --check index.js",
+    "google:auth": "node scripts/googleOAuth.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@langchain/core": "^1.2.1",
+    "@langchain/langgraph": "^1.4.7",
+    "chrono-node": "^2.9.1",
+    "dotenv": "^17.4.2",
+    "googleapis": "^173.0.0",
+    "mongoose": "^9.7.3",
+    "pm2": "^7.0.3",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.34.7"
+  }
+}
