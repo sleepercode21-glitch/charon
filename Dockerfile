@@ -36,6 +36,9 @@ RUN npm ci --omit=dev
 
 COPY --chown=node:node . .
 
+RUN mkdir -p /app/.wwebjs_auth /app/.wwebjs_cache \
+    && chown -R node:node /app/.wwebjs_auth /app/.wwebjs_cache
+
 USER node
 
 EXPOSE 3000

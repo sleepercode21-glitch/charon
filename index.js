@@ -289,6 +289,7 @@ async function main() {
     agent = createCharonAgent({ messageStore });
 
     const remoteAuthDataPath = process.env.WWEBJS_AUTH_DATA_PATH || './.wwebjs_auth/';
+    await fs.promises.mkdir(remoteAuthDataPath, { recursive: true });
     const store = new RemoteAuthMongoStore({ mongoose, dataPath: remoteAuthDataPath });
     const client = new Client({
         authStrategy: new RemoteAuth({

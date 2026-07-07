@@ -18,12 +18,17 @@ class RemoteAuthMongoStore {
         return path.join(this.dataPath, `${session}.zip`);
     }
 
+    async ensureDataPath() {
+        await fs.promises.mkdir(this.dataPath, { recursive: true });
+    }
+
     async sessionExists({ session }) {
         const collection = this.mongoose.connection.db.collection(`whatsapp-${session}.files`);
         return (await collection.countDocuments()) > 0;
     }
 
     async save({ session }) {
+        await this.ensureDataPath();
         const archivePath = this.archivePath(session);
         try {
             await fs.promises.access(archivePath);
@@ -47,6 +52,9 @@ class RemoteAuthMongoStore {
     }
 
     async extract({ session, path: outputPath }) {
+        await this.ensureDataPath();
+        await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
+
         const bucket = this.bucket(session);
         await new Promise((resolve, reject) => {
             const download = bucket.openDownloadStreamByName(`${session}.zip`);
