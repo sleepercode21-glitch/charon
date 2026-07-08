@@ -298,6 +298,7 @@ function puppeteerArgs() {
         '--disable-hang-monitor',
         '--disable-in-process-stack-traces',
         '--disable-logging',
+        '--disable-software-rasterizer',
         '--disk-cache-dir=/tmp/chromium-cache',
         '--metrics-recording-only',
         '--mute-audio',
@@ -307,6 +308,7 @@ function puppeteerArgs() {
         '--password-store=basic',
         '--user-data-dir=/tmp/chrome-user-data',
         '--use-mock-keychain',
+        '--window-size=1280,720',
         ...extraPuppeteerArgs(),
     ];
 }

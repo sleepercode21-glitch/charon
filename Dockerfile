@@ -5,7 +5,7 @@ ENV NODE_ENV=production \
     PUPPETEER_SKIP_DOWNLOAD=true \
     PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
-    PUPPETEER_HEADLESS=true \
+    PUPPETEER_HEADLESS=false \
     PUPPETEER_PROTOCOL_TIMEOUT_MS=120000
 
 USER root
@@ -40,6 +40,10 @@ RUN apt-get update \
         libxfixes3 \
         libxkbcommon0 \
         libxrandr2 \
+        libxss1 \
+        libxtst6 \
+        xauth \
+        xvfb \
         xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
@@ -58,4 +62,4 @@ USER pptruser
 
 EXPOSE 3000
 
-CMD ["dbus-run-session", "--", "node", "index.js"]
+CMD ["dbus-run-session", "--", "xvfb-run", "-a", "--server-args=-screen 0 1280x720x24 -ac +extension RANDR", "node", "index.js"]
