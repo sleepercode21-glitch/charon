@@ -15,6 +15,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         chromium \
+        dbus \
         fonts-liberation \
         libasound2 \
         libatk-bridge2.0-0 \
@@ -57,4 +58,4 @@ USER pptruser
 
 EXPOSE 3000
 
-CMD ["node", "index.js"]
+CMD ["dbus-run-session", "--", "node", "index.js"]
