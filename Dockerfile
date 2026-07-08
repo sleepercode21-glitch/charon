@@ -1,4 +1,4 @@
-FROM node:20-bookworm-slim
+FROM node:20-bullseye-slim
 
 ENV NODE_ENV=production \
     PORT=3000 \
@@ -16,6 +16,7 @@ RUN apt-get update \
         ca-certificates \
         chromium \
         dbus \
+        dumb-init \
         fonts-liberation \
         libasound2 \
         libatk-bridge2.0-0 \
@@ -62,4 +63,4 @@ USER pptruser
 
 EXPOSE 3000
 
-CMD ["dbus-run-session", "--", "xvfb-run", "-a", "--server-args=-screen 0 1280x720x24 -ac +extension RANDR", "node", "index.js"]
+CMD ["dumb-init", "--", "dbus-run-session", "--", "xvfb-run", "-a", "--server-args=-screen 0 1280x720x24 -ac +extension RANDR", "node", "index.js"]
