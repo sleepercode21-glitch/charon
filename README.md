@@ -10,7 +10,7 @@ The bot is designed for group coordination:
 - It works across all joined groups by default, with separate context per group.
 - It creates Google Meet links without creating Google Calendar events.
 - It sends text reminders before meetings and reminders.
-- It has slash-command fallbacks when LLM credits or rate limits are unavailable.
+- It has two modes: LLM mode for natural requests, and command mode for explicit bot commands.
 
 ## What Charon Can Do
 
@@ -74,7 +74,7 @@ charon/
   config/settings.js               Environment-driven runtime config
   execution/reminderWorker.js      Background reminder sender
   models/
-    llmWrapper.js                  Groq model wrapper and fallback handling
+    llmWrapper.js                  Groq model wrapper and rate guard
     prompts/                       Planner and response prompts
   providers/
     googleMeet.js                  Google Meet link creation
@@ -180,14 +180,12 @@ Keep `WHATSAPP_REPLY_MODE=tag_only` if you want Charon to observe all messages b
 
 ```text
 GROQ_MODEL=llama-3.1-8b-instant
-GROQ_FALLBACK_MODELS=
 LLM_MAX_OUTPUT_TOKENS=512
 LLM_PLAN_MAX_OUTPUT_TOKENS=280
 LLM_RESPONSE_MAX_OUTPUT_TOKENS=300
 LLM_MAX_INPUT_TOKENS=5000
 LLM_CONTEXT_TOKEN_BUDGET=2200
 LLM_MAX_CONTEXT_MESSAGES=16
-LLM_MODEL_COOLDOWN_MS=60000
 ```
 
 The planner is intentionally compact. Charon sends the tagged message, a small context window, active schedules/reminders, and poll summaries. It does not send the whole chat history.

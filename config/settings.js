@@ -14,15 +14,6 @@ function csvNumbersFromEnv(name, fallback) {
     return values.length > 0 ? values : fallback;
 }
 
-function csvStringsFromEnv(name, fallback) {
-    if (!process.env[name]) return fallback;
-    const values = process.env[name]
-        .split(',')
-        .map((value) => value.trim())
-        .filter(Boolean);
-    return values.length > 0 ? values : fallback;
-}
-
 const settings = {
     appName: 'charon',
     mongodbUri: process.env.MONGODB_URI,
@@ -38,7 +29,6 @@ const settings = {
     llm: {
         provider: 'groq',
         model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
-        fallbackModels: csvStringsFromEnv('GROQ_FALLBACK_MODELS', []),
         apiKey: process.env.GROQ_API_KEY,
         temperature: numberFromEnv('LLM_TEMPERATURE', 0.1),
         maxOutputTokens: numberFromEnv('LLM_MAX_OUTPUT_TOKENS', 512),
@@ -49,13 +39,11 @@ const settings = {
         contextTokenBudget: numberFromEnv('LLM_CONTEXT_TOKEN_BUDGET', 3200),
         maxContextMessages: numberFromEnv('LLM_MAX_CONTEXT_MESSAGES', 28),
         maxContextPolls: numberFromEnv('LLM_MAX_CONTEXT_POLLS', 8),
-        modelCooldownMs: numberFromEnv('LLM_MODEL_COOLDOWN_MS', 60000),
         tokensPerMinute: numberFromEnv('LLM_TOKENS_PER_MINUTE', 5200),
         requestsPerMinute: numberFromEnv('LLM_REQUESTS_PER_MINUTE', 25),
         rateSafetyMultiplier: numberFromEnv('LLM_RATE_SAFETY_MULTIPLIER', 1.35),
         minRequestIntervalMs: numberFromEnv('LLM_MIN_REQUEST_INTERVAL_MS', 1750),
         rateStartFull: process.env.LLM_RATE_START_FULL === 'true',
-        maxRateRetries: numberFromEnv('LLM_MAX_RATE_RETRIES', 2),
     },
     sessions: {
         defaultDurationMinutes: Math.max(numberFromEnv('DEFAULT_MEETING_DURATION_MINUTES', 180), 180),

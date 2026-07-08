@@ -1,7 +1,6 @@
 const { settings } = require('../config/settings');
 const { logger } = require('../utils/logger');
 
-const modelCooldowns = new Map();
 const GROQ_CHAT_COMPLETIONS_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const RATE_WINDOW_MS = 60 * 1000;
 
@@ -10,10 +9,6 @@ let availableRequests = settings.llm.rateStartFull ? Math.max(settings.llm.reque
 let lastRateRefillAt = Date.now();
 let lastLlmRequestAt = 0;
 let limiterQueue = Promise.resolve();
-
-function uniqueModels(models) {
-    return [...new Set(models.filter(Boolean))];
-}
 
 function estimateTokens(value) {
     const text = typeof value === 'string' ? value : JSON.stringify(value || '');
@@ -26,62 +21,6 @@ function estimateMessagesTokens(messages) {
 
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function errorMessage(error) {
-    return String(error?.message || error || '');
-}
-
-function isRetryableLlmError(error) {
-    const message = errorMessage(error).toLowerCase();
-    return message.includes('503')
-        || message.includes('service unavailable')
-        || message.includes('high demand')
-        || message.includes('429')
-        || message.includes('resource exhausted')
-        || message.includes('rate limit')
-        || message.includes('temporarily unavailable');
-}
-
-function retryDelayMs(error) {
-    if (Number.isFinite(error?.retryAfterMs) && error.retryAfterMs > 0) {
-        return error.retryAfterMs;
-    }
-
-    const message = errorMessage(error);
-    const retryInfoMatch = message.match(/"retryDelay":"([\d.]+)s"/);
-    const retryTextMatch = message.match(/retry in ([\d.]+)s/i);
-    const seconds = Number(retryInfoMatch?.[1] || retryTextMatch?.[1]);
-
-    if (Number.isFinite(seconds) && seconds > 0) {
-        return Math.ceil(seconds * 1000);
-    }
-
-    return settings.llm.modelCooldownMs;
-}
-
-function summarizeLlmError(error) {
-    const message = errorMessage(error);
-    const status = message.match(/\[(\d{3}) [^\]]+\]/)?.[1];
-    const quota = message.match(/Quota exceeded for metric: ([^,\n]+)/)?.[1];
-    const demand = message.includes('high demand') ? 'high demand' : '';
-
-    return [status ? `status ${status}` : null, quota, demand]
-        .filter(Boolean)
-        .join('; ') || message.split('\n')[0];
-}
-
-function coolDownModel(model, error) {
-    const delayMs = retryDelayMs(error);
-    const until = Date.now() + delayMs;
-    modelCooldowns.set(model, until);
-    return delayMs;
-}
-
-function activeModels(models) {
-    const now = Date.now();
-    const active = models.filter((model) => (modelCooldowns.get(model) || 0) <= now);
-    return active.length > 0 ? active : models;
 }
 
 function langchainRole(message) {
@@ -244,47 +183,12 @@ function createLlmModel() {
         throw new Error('GROQ_API_KEY is required for Groq.');
     }
 
-    const models = uniqueModels([
-        settings.llm.model,
-        ...(settings.llm.fallbackModels || []),
-    ]);
-    const instances = new Map();
+    const model = settings.llm.model;
+    const instance = createGroqChatModel(model);
 
     return {
         async invoke(messages, options) {
-            let lastError = null;
-            const candidates = activeModels(models);
-            const maxRateRetries = Math.max(Math.floor(settings.llm.maxRateRetries || 0), 0);
-
-            for (let index = 0; index < candidates.length; index += 1) {
-                const model = candidates[index];
-                if (!instances.has(model)) {
-                    instances.set(model, createGroqChatModel(model));
-                }
-
-                for (let attempt = 0; attempt <= maxRateRetries; attempt += 1) {
-                    try {
-                        return await instances.get(model).invoke(messages, options);
-                    } catch (error) {
-                        lastError = error;
-                        if (!isRetryableLlmError(error)) throw error;
-
-                        const delayMs = coolDownModel(model, error);
-                        const hasNext = index < candidates.length - 1;
-                        const canRetrySame = !hasNext && attempt < maxRateRetries;
-                        logger.warn(`${settings.llm.provider} model ${model} unavailable (${summarizeLlmError(error)}). Cooling down for ${Math.ceil(delayMs / 1000)}s${hasNext ? '; trying fallback.' : canRetrySame ? '; retrying after delay.' : '.'}`);
-
-                        if (hasNext) break;
-                        if (canRetrySame) {
-                            await sleep(delayMs);
-                            continue;
-                        }
-                        break;
-                    }
-                }
-            }
-
-            throw lastError;
+            return instance.invoke(messages, options);
         },
     };
 }

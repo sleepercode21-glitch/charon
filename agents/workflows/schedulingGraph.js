@@ -607,97 +607,6 @@ function cleanHint(value, max = 220) {
     return trimText(value, max);
 }
 
-function comparableWords(value) {
-    return String(value || '')
-        .toLowerCase()
-        .replace(/@\d+(?:@\S+)?/g, ' ')
-        .replace(/[^a-z0-9]+/g, ' ')
-        .split(/\s+/)
-        .filter((word) => word.length > 2);
-}
-
-function wordOverlapScore(left, right) {
-    const leftWords = new Set(comparableWords(left));
-    const rightWords = new Set(comparableWords(right));
-    if (leftWords.size === 0 || rightWords.size === 0) return 1;
-
-    let overlap = 0;
-    for (const word of leftWords) {
-        if (rightWords.has(word)) overlap += 1;
-    }
-
-    return overlap / Math.min(leftWords.size, rightWords.size);
-}
-
-function situationDetachedFromCurrentMessage(situation, body) {
-    const ask = String(situation?.currentAsk || '').trim();
-    const current = String(body || '').trim();
-    if (!ask || !current) return false;
-
-    const normalizedAsk = comparableWords(ask).join(' ');
-    const normalizedCurrent = comparableWords(current).join(' ');
-    if (!normalizedAsk || !normalizedCurrent) return false;
-    if (normalizedAsk.includes(normalizedCurrent) || normalizedCurrent.includes(normalizedAsk)) return false;
-
-    return wordOverlapScore(normalizedAsk, normalizedCurrent) < 0.35;
-}
-
-function fillPlanFromSituation(plan, situation) {
-    const next = { ...plan };
-    const intent = normalizedSituationIntent(situation?.primaryIntent);
-    const kindHint = normalizedKind(situation?.kindHint, situation?.kindHint) || String(situation?.kindHint || '');
-    const existingKind = normalizedKind(next.kind, next.kind);
-
-    if (!next.title && situation?.titleHint) next.title = cleanHint(situation.titleHint, 120);
-    if (!next.text && situation?.textHint) next.text = cleanHint(situation.textHint, 220);
-    if (!next.target && situation?.targetHint) next.target = cleanHint(situation.targetHint, 120);
-    if (!next.date && situation?.dateHint) next.date = cleanHint(situation.dateHint, 80);
-    if (!next.time && situation?.timeHint) next.time = cleanHint(situation.timeHint, 80);
-    if (!next.timezone && situation?.timezoneHint) next.timezone = cleanHint(situation.timezoneHint, 80);
-    if (existingKind) next.kind = existingKind;
-    if (!existingKind && kindHint) next.kind = kindHint;
-
-    if (intent === 'reminder' && !next.text) {
-        next.text = cleanHint(situation?.titleHint || situation?.currentAsk || next.title || 'Reminder', 220);
-    }
-
-    if (intent === 'schedule' && !next.title) {
-        next.title = cleanHint(situation?.textHint || situation?.currentAsk || 'Tech Up session', 120);
-    }
-
-    return next;
-}
-
-function alignPlanWithSituation(plan, situation) {
-    const situationIntent = normalizedSituationIntent(situation?.primaryIntent);
-    const confidence = Number(situation?.confidence || 0);
-    if (!situationIntent || confidence < 0.72) return plan;
-
-    const plannerIntent = normalizedIntent(plan.intent);
-    if (plannerIntent === situationIntent) {
-        return fillPlanFromSituation(plan, situation);
-    }
-
-    if (['cancel', 'update', 'complete', 'list', 'announce'].includes(plannerIntent)) {
-        return plan;
-    }
-
-    const canSituationOverride = (
-        ['answer', 'refuse'].includes(plannerIntent) && ACTION_INTENTS.has(situationIntent)
-    ) || (
-        ['schedule', 'reminder'].includes(plannerIntent)
-        && ['schedule', 'reminder', 'cancel', 'update', 'complete', 'list'].includes(situationIntent)
-    );
-
-    if (!canSituationOverride) return plan;
-
-    return fillPlanFromSituation({
-        ...plan,
-        intent: situationIntent,
-        source: `${plan.source || 'llm'}+situation`,
-    }, situation);
-}
-
 function normalizedToolKind(value) {
     const kind = normalizedKind(value, value);
     return kind || '';
@@ -930,54 +839,28 @@ function planFromRepeatedDbTool(dbResults) {
     };
 }
 
-function fallbackSituation(body) {
-    return {
-        primaryIntent: 'answer',
-        confidence: 0.45,
-        currentAsk: trimText(body, 220),
-        focus: 'current_message',
-        useQuoted: false,
-        needsDb: false,
-        titleHint: '',
-        textHint: trimText(body, 220),
-        targetHint: '',
-        dateHint: '',
-        timeHint: '',
-        timezoneHint: '',
-        kindHint: '',
-        missing: '',
-        ignore: '',
-        why: 'Fallback situation after unreadable LLM output.',
-    };
-}
-
 function normalizeSituation(raw, body) {
     const situation = raw && typeof raw === 'object' ? raw : {};
-    const detached = situationDetachedFromCurrentMessage(situation, body);
-    const intent = detached ? 'answer' : normalizedSituationIntent(situation.primaryIntent) || 'answer';
+    const intent = normalizedSituationIntent(situation.primaryIntent) || 'answer';
     const confidence = Math.max(0, Math.min(1, Number(situation.confidence || 0)));
-
-    if (detached) {
-        logger.warn(`Situation output looked stale; demoting it. current="${trimText(body, 90)}" situationAsk="${trimText(situation.currentAsk, 90)}"`);
-    }
 
     return {
         primaryIntent: intent,
-        confidence: detached ? Math.min(confidence, 0.35) : confidence,
-        currentAsk: cleanHint(detached ? body : situation.currentAsk || body, 240),
-        focus: cleanHint(detached ? 'current_message' : situation.focus || 'current_message', 60),
-        useQuoted: detached ? false : Boolean(situation.useQuoted),
-        needsDb: detached ? false : Boolean(situation.needsDb),
-        titleHint: cleanHint(detached ? '' : situation.titleHint || '', 140),
-        textHint: cleanHint(detached ? '' : situation.textHint || '', 260),
-        targetHint: cleanHint(detached ? '' : situation.targetHint || '', 160),
-        dateHint: cleanHint(detached ? '' : situation.dateHint || '', 80),
-        timeHint: cleanHint(detached ? '' : situation.timeHint || '', 80),
-        timezoneHint: cleanHint(detached ? '' : situation.timezoneHint || '', 80),
-        kindHint: cleanHint(detached ? '' : situation.kindHint || '', 40),
+        confidence,
+        currentAsk: cleanHint(situation.currentAsk || body, 240),
+        focus: cleanHint(situation.focus || 'current_message', 60),
+        useQuoted: Boolean(situation.useQuoted),
+        needsDb: Boolean(situation.needsDb),
+        titleHint: cleanHint(situation.titleHint || '', 140),
+        textHint: cleanHint(situation.textHint || '', 260),
+        targetHint: cleanHint(situation.targetHint || '', 160),
+        dateHint: cleanHint(situation.dateHint || '', 80),
+        timeHint: cleanHint(situation.timeHint || '', 80),
+        timezoneHint: cleanHint(situation.timezoneHint || '', 80),
+        kindHint: cleanHint(situation.kindHint || '', 40),
         missing: cleanHint(situation.missing || '', 140),
-        ignore: cleanHint(detached ? 'stale situation output ignored' : situation.ignore || '', 180),
-        why: cleanHint(detached ? 'Situation currentAsk did not match the actual current message.' : situation.why || '', 220),
+        ignore: cleanHint(situation.ignore || '', 180),
+        why: cleanHint(situation.why || '', 220),
     };
 }
 
@@ -985,7 +868,7 @@ function hasTimeRequest(plan) {
     return Boolean(plan.date || plan.time);
 }
 
-function whenText(plan, fallbackText = '') {
+function whenText(plan) {
     if (!plan.date && !plan.time) return '';
     return [plan.date, plan.time, plan.timezone].filter(Boolean).join(' ').trim();
 }
@@ -1155,25 +1038,6 @@ function planToDecision(plan, body) {
     return decision;
 }
 
-function staleSchedulingOnlyAnswer(value) {
-    const text = String(value || '').toLowerCase();
-    return text.includes('not within my capabilities')
-        || text.includes('only') && text.includes('scheduling') && text.includes('reminder')
-        || text.includes('would you like to create') && (text.includes('schedule') || text.includes('reminder'));
-}
-
-function repairAnswerPlan(plan, body) {
-    if (plan.intent !== 'answer') return plan;
-    if (!staleSchedulingOnlyAnswer(`${plan.text}\n${plan.reply}\n${plan.ask}`)) return plan;
-
-    return {
-        ...plan,
-        text: body,
-        reply: `Answer the current message naturally: ${body}`,
-        ask: '',
-    };
-}
-
 function routeAfterPlan(state) {
     return ACTION_INTENTS.has(state.decision.intent) ? 'tools' : 'respond';
 }
@@ -1239,7 +1103,7 @@ function safeReplyForState(state, reply) {
     return sanitizeReply(`I should not fake that, sir. If you want action, tell me plainly what to schedule, list, cancel, or update. Current ask: ${trimText(body, 120)}`);
 }
 
-function fallbackReply(state) {
+function deterministicBotReply(state) {
     const result = state.actionResult || {};
     const plan = state.plan || {};
 
@@ -1309,6 +1173,14 @@ function fallbackReply(state) {
     return 'Done, sir.';
 }
 
+function commandModePlan(reason = 'LLM mode is unavailable.') {
+    return {
+        intent: 'answer',
+        reply: `${reason}\n\n${COMMAND_HELP}`,
+        source: 'command_mode',
+    };
+}
+
 function shouldUseDeterministicReply(state) {
     return ACTION_INTENTS.has(state.decision?.intent)
         || String(state.plan?.source || '').startsWith('command');
@@ -1333,16 +1205,14 @@ function createSchedulingGraph({ messageStore }) {
             ask: String(rawPlan.ask || ''),
             source: String(rawPlan.source || 'llm'),
         };
-        const situatedPlan = alignPlanWithSituation(plan, state.situation);
-        const repairedPlan = repairAnswerPlan(situatedPlan, body);
-        const decision = planToDecision(repairedPlan, body);
-        const timeResolution = timeResolutionForPlan(repairedPlan, body);
+        const decision = planToDecision(plan, body);
+        const timeResolution = timeResolutionForPlan(plan, body);
 
-        logJson('Plan parsed', { plan: repairedPlan, decision, timeResolution });
+        logJson('Plan parsed', { plan, decision, timeResolution });
 
         return {
             context,
-            plan: repairedPlan,
+            plan,
             decision,
             timeResolution,
             nextStep: routeAfterPlan({ decision }),
@@ -1390,13 +1260,23 @@ function createSchedulingGraph({ messageStore }) {
             logModelUsage('Situation', response, estimated);
             logJson('Situation raw', response.content);
 
-            const situation = normalizeSituation(safeJson(response.content) || fallbackSituation(body), body);
+            const parsed = safeJson(response.content);
+            if (!parsed) throw new Error('invalid_situation_json');
+            const situation = normalizeSituation(parsed, body);
             logJson('Situation parsed', situation);
             return { context, situation, nextStep: 'planner' };
         } catch (error) {
-            logger.warn('Situation reader failed; planner will continue with raw context.', error);
-            const situation = fallbackSituation(body);
-            logJson('Situation fallback', situation);
+            logger.warn('Situation reader failed; switching to command mode.', error);
+            const situation = {
+                ...normalizeSituation({
+                    primaryIntent: 'answer',
+                    confidence: 1,
+                    currentAsk: body,
+                    textHint: COMMAND_HELP,
+                    why: 'LLM situation reader failed.',
+                }, body),
+                llmFailed: true,
+            };
             return { context, situation, nextStep: 'planner' };
         }
     }
@@ -1412,12 +1292,21 @@ function createSchedulingGraph({ messageStore }) {
             return stateFromPlan({ state, context, rawPlan: commandPlan });
         }
 
+        const context = Object.keys(state.context || {}).length > 0
+            ? state.context
+            : await messageStore.recentContext(chatId(state.input.chat));
+
+        if (state.situation?.llmFailed) {
+            return stateFromPlan({
+                state,
+                context,
+                rawPlan: commandModePlan('LLM mode is unavailable, sir. Use command mode:'),
+            });
+        }
+
         if (!model) model = createLlmModel();
 
         const id = chatId(state.input.chat);
-        const context = Object.keys(state.context || {}).length > 0
-            ? state.context
-            : await messageStore.recentContext(id);
         const dbResults = [];
         const seenDbToolCalls = new Set();
         try {
@@ -1437,10 +1326,8 @@ function createSchedulingGraph({ messageStore }) {
                 logModelUsage(`Plan step ${step + 1}`, response, estimated);
                 logJson(`Plan raw ${step + 1}`, response.content);
 
-                const parsed = safeJson(response.content) || {
-                    intent: 'answer',
-                    reply: 'I could not read that cleanly. Say it once more plainly.',
-                };
+                const parsed = safeJson(response.content);
+                if (!parsed) throw new Error('invalid_plan_json');
 
                 if (parsed.tool) {
                     const key = dbToolKey(parsed);
@@ -1458,10 +1345,7 @@ function createSchedulingGraph({ messageStore }) {
                         return stateFromPlan({
                             state,
                             context,
-                            rawPlan: {
-                                intent: 'answer',
-                                reply: 'I checked the database but could not settle on one safe item. Send me the schedule or reminder id.',
-                            },
+                            rawPlan: commandModePlan('LLM mode could not choose a safe DB action, sir. Use command mode:'),
                         });
                     }
 
@@ -1482,21 +1366,14 @@ function createSchedulingGraph({ messageStore }) {
             return stateFromPlan({
                 state,
                 context,
-                rawPlan: {
-                    intent: 'answer',
-                    reply: 'I checked the database but could not settle on a safe action. Try with the schedule/reminder id.',
-                },
+                rawPlan: commandModePlan('LLM mode could not settle on a safe action, sir. Use command mode:'),
             });
         } catch (error) {
             logger.warn('Planner LLM failed; command mode remains available.', error);
             return stateFromPlan({
                 state,
                 context,
-                rawPlan: {
-                    intent: 'answer',
-                    reply: `LLM credits or service are unavailable, sir.\n\n${COMMAND_HELP}`,
-                    source: 'command_fallback',
-                },
+                rawPlan: commandModePlan('LLM mode is unavailable, sir. Use command mode:'),
             });
         }
     }
@@ -1563,7 +1440,7 @@ function createSchedulingGraph({ messageStore }) {
 
     async function respondNode(state) {
         if (shouldUseDeterministicReply(state)) {
-            const reply = safeReplyForState(state, fallbackReply(state));
+            const reply = safeReplyForState(state, deterministicBotReply(state));
             logJson('Final deterministic reply', reply);
             return { reply, nextStep: 'end' };
         }
@@ -1582,12 +1459,15 @@ function createSchedulingGraph({ messageStore }) {
             logJson('Response raw', response.content);
 
             const parsed = safeJson(response.content);
-            const reply = safeReplyForState(state, String(parsed?.reply || '').trim() || fallbackReply(state));
-            logJson('Final reply', reply);
-            return { reply, nextStep: 'end' };
+            const reply = String(parsed?.reply || '').trim();
+            if (!reply) throw new Error('invalid_response_json');
+            const safeReply = safeReplyForState(state, reply);
+            logJson('Final reply', safeReply);
+            return { reply: safeReply, nextStep: 'end' };
         } catch (error) {
-            logger.warn('Response writer failed; using fallback reply.', error);
-            return { reply: safeReplyForState(state, fallbackReply(state)), nextStep: 'end' };
+            logger.warn('Response writer failed; switching to command mode.', error);
+            const reply = safeReplyForState(state, commandModePlan('LLM response mode is unavailable, sir. Use command mode:').reply);
+            return { reply, nextStep: 'end' };
         }
     }
 
@@ -1612,7 +1492,7 @@ async function invokeSchedulingGraph(graph, input) {
         return await graph.invoke({ input });
     } catch (error) {
         logger.error('Scheduling graph failed', error);
-        return { reply: 'Something jammed in the machinery, sir. Try that once more.' };
+        return { reply: commandModePlan('Something failed, sir. Use command mode:').reply };
     }
 }
 
