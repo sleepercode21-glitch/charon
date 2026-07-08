@@ -187,9 +187,11 @@ function parseDate(value, referenceDate = new Date(), timezoneHint = null) {
     }
 
     const parseText = timezone ? stripTimezoneTokens(text) : text;
-    const parsed = chrono.parseDate(parseText, referenceDate, { forwardDate: true });
+    const parsedResult = chrono.parse(parseText, referenceDate, { forwardDate: true })[0];
+    const parsed = parsedResult?.start?.date();
     if (parsed && !Number.isNaN(parsed.getTime())) {
         if (!timezone) return parsed;
+        if (parsedResult.tags?.().has('result/relativeDate')) return parsed;
 
         const zoned = sameWallClockInZone(parsed, timezone);
         if (zoned <= referenceDate && !hasDateSignal(parseText)) {

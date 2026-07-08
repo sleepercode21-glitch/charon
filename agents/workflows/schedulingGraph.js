@@ -155,7 +155,13 @@ function currentDateContext(timezone) {
         timeZoneName: 'short',
     }).format(now);
 
-    return `${local}|${now.toISOString()}`;
+    return {
+        backendTimezone: timezone,
+        backendLocal: local,
+        utc: now.toISOString(),
+        timestampMs: now.getTime(),
+        relativeTimeRule: `Resolve phrases like "in 2 minutes", "in 30 mins", "tomorrow", and "next Tuesday" from backendLocal in ${timezone}.`,
+    };
 }
 
 function withoutCurrentMessage(context, message) {
@@ -699,7 +705,7 @@ function plannerPayload({ input, context, situation = null }) {
     const body = messageText(message);
 
     return JSON.stringify({
-        now: currentDateContext(input.timezone),
+        clock: currentDateContext(input.timezone),
         defaultTz: input.timezone,
         room: {
             chatId: chatId(input.chat),
