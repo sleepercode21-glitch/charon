@@ -192,10 +192,22 @@ function logJson(label, value) {
 }
 
 function cleanCommandText(value) {
-    return String(value || '')
+    const cleaned = String(value || '')
         .replace(/@\d+(?:@\S+)?/g, '')
         .replace(/\s+/g, ' ')
         .trim();
+
+    return collapseRepeatedCommandText(cleaned);
+}
+
+function collapseRepeatedCommandText(value) {
+    const words = String(value || '').trim().split(/\s+/).filter(Boolean);
+    if (words.length < 2 || words.length % 2 !== 0) return String(value || '').trim();
+
+    const half = words.length / 2;
+    const left = words.slice(0, half).join(' ').toLowerCase();
+    const right = words.slice(half).join(' ').toLowerCase();
+    return left === right ? words.slice(0, half).join(' ') : String(value || '').trim();
 }
 
 function commandCreateUsageReply(kind = 'schedule') {
@@ -304,11 +316,31 @@ function planForCreate(createKind, payload) {
 
 function parseKindAndTarget(value, { allowAll = false } = {}) {
     const text = String(value || '').trim();
+    const allKindMatch = text.match(/^all(?:\s+(schedules?|meetings?|sessions?|reminders?))?(?:\s+and\s+(schedules?|meetings?|sessions?|reminders?))?$/i);
+    if (allowAll && allKindMatch) {
+        const firstKind = allKindMatch[1] ? normalizedKind(allKindMatch[1], allKindMatch[1]) : '';
+        const secondKind = allKindMatch[2] ? normalizedKind(allKindMatch[2], allKindMatch[2]) : '';
+        return {
+            rawKind: 'all',
+            kind: firstKind && (!secondKind || firstKind === secondKind) ? firstKind : '',
+            target: '',
+        };
+    }
+
     const match = text.match(/^(schedule(?:s)?|meeting(?:s)?|session(?:s)?|reminder(?:s)?|all)\b\s*([\s\S]*)$/i);
     if (!match) return null;
 
     const rawKind = match[1].toLowerCase();
     if (rawKind === 'all' && !allowAll) return null;
+    if (allowAll && rawKind === 'all') {
+        const target = match[2].trim();
+        const targetKind = normalizedKind(target, target);
+        return {
+            rawKind,
+            kind: targetKind === 'meeting' || targetKind === 'reminder' ? targetKind : '',
+            target: '',
+        };
+    }
 
     return {
         rawKind,
@@ -321,7 +353,7 @@ function parseManualCommandPlan(body) {
     const text = String(body || '').trim();
     const lower = text.toLowerCase();
 
-    if (lower === 'help' || lower === 'commands' || lower === 'command mode') {
+    if (lower === 'help' || lower === 'commands' || lower === 'command mode' || /\bhelp\b.*\bcommands?\b|\bcommands?\b.*\bhelp\b/.test(lower)) {
         return {
             intent: 'answer',
             reply: COMMAND_HELP,

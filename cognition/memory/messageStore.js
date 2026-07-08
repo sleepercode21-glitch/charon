@@ -340,6 +340,7 @@ function createMessageStore({ mongoose }) {
                 if (sentKeys.has(key)) continue;
 
                 const dueAt = new Date(new Date(meeting.start).getTime() - lead * 60 * 1000);
+                if (lead > 0 && meeting.createdAt && dueAt < new Date(meeting.createdAt)) continue;
                 const isDue = dueAt <= now && dueAt >= new Date(now.getTime() - dueGraceMs);
                 if (isDue) {
                     meetingDue.push({ meeting, key, leadMinutes: lead, dueAt });
@@ -391,6 +392,7 @@ function createMessageStore({ mongoose }) {
                 if (sentKeys.has(key)) continue;
 
                 const dueAt = new Date(new Date(reminder.dueAt).getTime() - lead * 60 * 1000);
+                if (lead > 0 && reminder.createdAt && dueAt < new Date(reminder.createdAt)) continue;
                 const isDue = dueAt <= now && dueAt >= new Date(now.getTime() - dueGraceMs);
                 if (isDue) {
                     reminderDue.push({ reminder, key, leadMinutes: lead, dueAt });

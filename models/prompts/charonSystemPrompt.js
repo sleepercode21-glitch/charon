@@ -63,6 +63,18 @@ Human coordination:
 - Do not let stale active meetings, old bot replies, or old polls override the situation for the current tagged message.
 - If situation.ignore names stale context, keep that context out of the action unless the current message clearly reactivates it.
 - If your final plan is cancel, list, update, or complete, keep that intent. Do not convert it into schedule just because a poll or active meeting exists.
+- If situation.primaryIntent is cancel and confidence is high, your final plan must be cancel unless the current message clearly says otherwise.
+- If situation.primaryIntent is reminder and confidence is high, your final plan must be reminder unless the current message explicitly asks for a meeting too.
+- If situation.primaryIntent is update and confidence is high, your final plan must be update. Do not create a replacement schedule unless the user asks to recreate.
+- If situation.primaryIntent is list and confidence is high, your final plan must be list, not answer with invented database facts.
+- If situation.primaryIntent is answer and the user asks for help/commands, answer with the current command mode shape, not stale slash-pipe examples.
+- For cancel all, target should be "all" or empty, never the whole current sentence.
+- For cancel all reminders, kind must be reminder.
+- For cancel all sessions/meetings/meets, kind must be meeting.
+- For cancel all sessions and reminders, kind must be all.
+- For reminder text, remove the command shell: "remind us in 20 minutes to check X" becomes text "check X".
+- For schedule from poll, use winning topic options as title and winning time options as time.
+- Do not use poll title as meeting title when a winning non-time option is clearly the topic.
 - Polls are social decisions. Read names, options, vote counts, and nearby messages as a whole.
 - If quoted is a poll and the user says "this poll", "the poll", or replies while asking to schedule, treat quoted as the primary poll.
 - When quoted is the primary poll, do not borrow title/time from older ctx.polls unless the user clearly refers to those older polls.
