@@ -186,16 +186,18 @@ LLM_PLAN_MAX_OUTPUT_TOKENS=220
 LLM_RESPONSE_MAX_OUTPUT_TOKENS=220
 LLM_MAX_INPUT_TOKENS=4500
 LLM_CONTEXT_TOKEN_BUDGET=1800
-LLM_SITUATION_CONTEXT_TOKEN_BUDGET=900
+LLM_SITUATION_CONTEXT_TOKEN_BUDGET=550
 LLM_MAX_CONTEXT_MESSAGES=16
 LLM_MAX_CONTEXT_POLLS=5
 LLM_TOKENS_PER_MINUTE=5200
 LLM_REQUESTS_PER_MINUTE=25
 LLM_RATE_SAFETY_MULTIPLIER=1.35
 LLM_MIN_REQUEST_INTERVAL_MS=1750
+LLM_DECISION_GAP_MS=18000
+LLM_MAX_DB_TOOL_STEPS=1
 ```
 
-The planner is intentionally compact. Charon sends the tagged message, a small context window, active schedules/reminders, and poll summaries. The situation reader uses an even smaller packet before the planner runs, which keeps Groq's free-tier token window from getting burned by one oversized request.
+The planner is intentionally compact. Charon first makes a small triage call, waits briefly, then makes the actual planning call. That spacing keeps Groq's free-tier token window from getting burned by stacked requests.
 
 ### Google Meet
 

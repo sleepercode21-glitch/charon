@@ -20,7 +20,7 @@ const { updateActiveItem } = require('../tools/update');
 const ACTION_INTENTS = new Set(['schedule', 'reminder', 'update', 'cancel', 'complete', 'list', 'announce']);
 const KNOWN_INTENTS = new Set([...ACTION_INTENTS, 'answer', 'refuse']);
 const DB_TOOL_NAMES = new Set(['list_active_items', 'get_active_item']);
-const MAX_DB_TOOL_STEPS = 3;
+const MAX_DB_TOOL_STEPS = Math.max(0, Math.floor(settings.llm.maxDbToolSteps || 1));
 const TOOLBELT = [
     {
         intent: 'schedule',
@@ -71,6 +71,10 @@ const TOOLBELT = [
         outputs: ['reply'],
     },
 ];
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 const COMMAND_TIME_FORMAT = 'YYYY-MM-DD HH:MM Area/City';
 const COMMAND_SCHEDULE_USAGE = `new schedule: Title, ${COMMAND_TIME_FORMAT}`;
@@ -1361,6 +1365,12 @@ function createSchedulingGraph({ messageStore }) {
         const dbResults = [];
         const seenDbToolCalls = new Set();
         try {
+            const decisionGapMs = Math.max(settings.llm.decisionGapMs || 0, 0);
+            if (decisionGapMs > 0) {
+                logger.info(`Spacing LLM decision calls by ${Math.ceil(decisionGapMs / 1000)}s before planner.`);
+                await sleep(decisionGapMs);
+            }
+
             for (let step = 0; step <= MAX_DB_TOOL_STEPS; step += 1) {
                 const payload = plannerLoopPayload({
                     input: state.input,
