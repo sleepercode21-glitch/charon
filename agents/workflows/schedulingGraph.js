@@ -699,6 +699,19 @@ function compactForPlanner(context, message) {
     });
 }
 
+function compactForSituation(context, message) {
+    return compactContext(withoutCurrentMessage(context, message), {
+        maxTokens: settings.llm.situationContextTokenBudget || 900,
+        maxMessages: Math.min(settings.llm.maxContextMessages, 10),
+        minMessages: 3,
+        maxTextChars: 130,
+        maxPolls: Math.min(settings.llm.maxContextPolls, 4),
+        maxMeetings: 4,
+        maxReminders: 4,
+        includeBotMessages: true,
+    });
+}
+
 function plannerPayload({ input, context, situation = null }) {
     const message = input.message;
     const compact = compactForPlanner(context, message);
@@ -735,10 +748,42 @@ function plannerPayload({ input, context, situation = null }) {
 }
 
 function situationPayload({ input, context }) {
-    const base = JSON.parse(plannerPayload({ input, context }));
-    delete base.situation;
+    const message = input.message;
+    const compact = compactForSituation(context, message);
+    const body = messageText(message);
+
     return JSON.stringify({
-        ...base,
+        clock: currentDateContext(input.timezone),
+        defaultTz: input.timezone,
+        room: {
+            chatId: chatId(input.chat),
+            chatName: input.chat?.name || '',
+            replyMode: settings.whatsapp.replyMode,
+            groupScope: settings.whatsapp.groupScope,
+        },
+        message: {
+            id: message?.id?._serialized || message?.id || '',
+            type: message?.type || '',
+            timestamp: message?.timestamp ? new Date(message.timestamp * 1000).toISOString() : '',
+            author: message?.author || message?.from || '',
+            fromMe: Boolean(message?.fromMe),
+        },
+        quoted: input.quoted || null,
+        requester: input.storedMessage?.senderName || message.author || message.from || 'unknown',
+        msg: body,
+        pending: pendingClarification(context, message),
+        capabilities: [
+            'chat naturally when addressed',
+            'create/list/update/cancel meetings',
+            'create/list/update/cancel reminders',
+            'read recent messages and polls',
+            'ask only when essential details are missing',
+        ],
+        ctx: JSON.parse(compact.json),
+        budget: {
+            ctxTokens: compact.estimatedTokens,
+            omittedOlderMessages: compact.omitted?.olderMessages || 0,
+        },
         objective: 'Read the current room state and classify what Charon should do next. Do not call tools.',
     });
 }

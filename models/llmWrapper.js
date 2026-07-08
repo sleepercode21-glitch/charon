@@ -116,45 +116,82 @@ function reconcileActualUsage({ actualTokens, reservedTokens, model }) {
     logger.info(`LLM rate guard reconciled ${extra} extra tokens for ${model}; actual=${actualTokens}, reserved=${reservedTokens}.`);
 }
 
+function retryDelayFromGroq({ response, parsed }) {
+    const retryAfter = Number(response.headers.get('retry-after'));
+    if (Number.isFinite(retryAfter) && retryAfter > 0) {
+        return Math.ceil(retryAfter * 1000);
+    }
+
+    const message = String(parsed?.error?.message || '');
+    const match = message.match(/try again in\s+([0-9.]+)\s*(ms|s|m)/i);
+    if (!match) return 0;
+
+    const amount = Number(match[1]);
+    if (!Number.isFinite(amount) || amount <= 0) return 0;
+    const unit = match[2].toLowerCase();
+    if (unit === 'm') return Math.ceil(amount * 60 * 1000);
+    if (unit === 's') return Math.ceil(amount * 1000);
+    return Math.ceil(amount);
+}
+
+function reconcileRejectedRequest({ reservedTokens, model }) {
+    const tokenLimit = Math.max(settings.llm.tokensPerMinute || 0, 0);
+    if (tokenLimit <= 0 || !reservedTokens) return;
+    refillRateBuckets();
+    availableTokens = Math.min(tokenLimit, availableTokens + reservedTokens);
+    logger.info(`LLM rate guard released ${reservedTokens} reserved tokens for failed ${model} request.`);
+}
+
 function createGroqChatModel(model) {
     return {
         async invoke(messages, options = {}) {
             const maxOutputTokens = options.maxOutputTokens || settings.llm.maxOutputTokens;
             const estimatedRequestTokens = estimateMessagesTokens(messages) + maxOutputTokens;
             const reservation = await reserveLlmCapacity({ estimatedTokens: estimatedRequestTokens, model });
-
-            const response = await fetch(GROQ_CHAT_COMPLETIONS_URL, {
-                method: 'POST',
-                headers: {
-                    Authorization: `Bearer ${settings.llm.apiKey}`,
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    model,
-                    messages: messages.map((message) => ({
-                        role: langchainRole(message),
-                        content: langchainContent(message),
-                    })),
-                    temperature: settings.llm.temperature,
-                    max_completion_tokens: maxOutputTokens,
-                    ...(options.json ? { response_format: { type: 'json_object' } } : {}),
-                }),
+            const requestBody = JSON.stringify({
+                model,
+                messages: messages.map((message) => ({
+                    role: langchainRole(message),
+                    content: langchainContent(message),
+                })),
+                temperature: settings.llm.temperature,
+                max_completion_tokens: maxOutputTokens,
+                ...(options.json ? { response_format: { type: 'json_object' } } : {}),
             });
 
-            const body = await response.text();
             let parsed = null;
-            try {
-                parsed = JSON.parse(body);
-            } catch (_error) {
-                parsed = null;
-            }
+            for (let attempt = 0; attempt < 2; attempt += 1) {
+                const response = await fetch(GROQ_CHAT_COMPLETIONS_URL, {
+                    method: 'POST',
+                    headers: {
+                        Authorization: `Bearer ${settings.llm.apiKey}`,
+                        'Content-Type': 'application/json',
+                    },
+                    body: requestBody,
+                });
 
-            if (!response.ok) {
-                const error = new Error(`[${response.status} ${response.statusText}] ${body}`);
-                const retryAfter = Number(response.headers.get('retry-after'));
-                if (Number.isFinite(retryAfter) && retryAfter > 0) {
-                    error.retryAfterMs = Math.ceil(retryAfter * 1000);
+                const body = await response.text();
+                try {
+                    parsed = JSON.parse(body);
+                } catch (_error) {
+                    parsed = null;
                 }
+
+                if (response.ok) break;
+
+                const delayMs = retryDelayFromGroq({ response, parsed });
+                if ((response.status === 429 || response.status === 503) && attempt === 0 && delayMs > 0 && delayMs <= 65_000) {
+                    logger.warn(`Groq asked Charon to wait ${Math.ceil(delayMs / 1000)}s for ${model}; retrying once.`);
+                    await sleep(delayMs + 250);
+                    continue;
+                }
+
+                reconcileRejectedRequest({
+                    reservedTokens: reservation?.reservedTokens || 0,
+                    model,
+                });
+                const error = new Error(`[${response.status} ${response.statusText}] ${body}`);
+                if (delayMs > 0) error.retryAfterMs = delayMs;
                 throw error;
             }
 
