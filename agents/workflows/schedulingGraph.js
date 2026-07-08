@@ -72,37 +72,46 @@ const TOOLBELT = [
     },
 ];
 
-const COMMAND_TIME_FORMAT = 'MM/DD/YY HH:MM Area/City';
-const COMMAND_SCHEDULE_USAGE = `/create schedule | Title | ${COMMAND_TIME_FORMAT}`;
-const COMMAND_REMINDER_USAGE = `/create reminder | Text | ${COMMAND_TIME_FORMAT}`;
-const COMMAND_SCHEDULE_EXAMPLE = '/create schedule | Banking system design | 07/09/26 20:00 America/Chicago';
-const COMMAND_REMINDER_EXAMPLE = '/create reminder | Submit slides | 07/09/26 18:30 Asia/Kolkata';
+const COMMAND_TIME_FORMAT = 'YYYY-MM-DD HH:MM Area/City';
+const COMMAND_SCHEDULE_USAGE = `new schedule: Title, ${COMMAND_TIME_FORMAT}`;
+const COMMAND_REMINDER_USAGE = `new reminder: Text, ${COMMAND_TIME_FORMAT}`;
+const COMMAND_SCHEDULE_EXAMPLE = 'new schedule: Banking system design, 2026-07-09 20:00 America/Chicago';
+const COMMAND_REMINDER_EXAMPLE = 'new reminder: Submit slides, 2026-07-09 18:30 Asia/Kolkata';
 const COMMAND_HELP = [
-    'Charon command mode, sir:',
+    'Charon command mode, sir',
     '',
-    'Create:',
+    'Create',
     COMMAND_SCHEDULE_USAGE,
     COMMAND_REMINDER_USAGE,
     '',
-    'Examples:',
+    'Examples',
     COMMAND_SCHEDULE_EXAMPLE,
     COMMAND_REMINDER_EXAMPLE,
     '',
-    'List:',
-    '/list schedules',
-    '/list reminders',
-    '/list all',
+    'Show',
+    'show schedules',
+    'show reminders',
+    'show all',
     '',
-    'Cancel:',
-    '/cancel schedule <id>',
-    '/cancel reminder <id>',
-    '/cancel all',
+    'Update',
+    `move schedule <id>: ${COMMAND_TIME_FORMAT}`,
+    `move reminder <id>: ${COMMAND_TIME_FORMAT}`,
+    'rename schedule <id>: New title',
+    'rename reminder <id>: New reminder text',
     '',
-    'Help:',
-    '/help',
+    'Finish or cancel',
+    'done schedule <id>',
+    'done reminder <id>',
+    'cancel schedule <id>',
+    'cancel reminder <id>',
+    'cancel all',
     '',
-    'Time must be concrete:',
+    'Help',
+    'help',
+    '',
+    'Concrete time only',
     COMMAND_TIME_FORMAT,
+    'Also accepted: MM-DD-YY HH:MM Area/City',
 ].join('\n');
 
 const CharonState = Annotation.Root({
@@ -199,10 +208,21 @@ function commandCreateUsageReply(kind = 'schedule') {
 
 function parseConcreteCommandWhen(value) {
     const text = String(value || '').trim();
-    const match = text.match(/^(\d{2})\/(\d{2})\/(\d{2}|\d{4})\s+([01]\d|2[0-3]):([0-5]\d)\s+([A-Za-z_+-]+(?:\/[A-Za-z0-9_+-]+)+|UTC)$/);
+    const match = text.match(/^(?:(\d{4})-(\d{2})-(\d{2})|(\d{2})[/-](\d{2})[/-](\d{2}|\d{4}))\s+([01]\d|2[0-3]):([0-5]\d)\s+([A-Za-z_+-]+(?:\/[A-Za-z0-9_+-]+)+|UTC)$/);
     if (!match) return null;
 
-    const [, month, day, year, hour, minute, timezoneText] = match;
+    const isoYear = match[1];
+    const isoMonth = match[2];
+    const isoDay = match[3];
+    const shortMonth = match[4];
+    const shortDay = match[5];
+    const shortYear = match[6];
+    const hour = match[7];
+    const minute = match[8];
+    const timezoneText = match[9];
+    const month = isoMonth || shortMonth;
+    const day = isoDay || shortDay;
+    const year = isoYear || shortYear;
     const fullYear = year.length === 2 ? 2000 + Number(year) : Number(year);
     const date = new Date(Date.UTC(fullYear, Number(month) - 1, Number(day), Number(hour), Number(minute)));
     const isValidDate = date.getUTCFullYear() === fullYear
@@ -219,8 +239,213 @@ function parseConcreteCommandWhen(value) {
     };
 }
 
+function parseCreatePayload(value) {
+    const text = String(value || '').trim();
+    if (!text) return { title: '', whenInput: '' };
+
+    if (text.includes('|')) {
+        const parts = text.split('|').map((part) => part.trim()).filter(Boolean);
+        return {
+            title: parts[0] || '',
+            whenInput: parts.length >= 4 ? `${parts[1]} ${parts[2]} ${parts[3]}` : parts[1] || '',
+        };
+    }
+
+    const commaParts = text.split(',').map((part) => part.trim()).filter(Boolean);
+    if (commaParts.length >= 2) {
+        return {
+            title: commaParts.slice(0, -1).join(', '),
+            whenInput: commaParts[commaParts.length - 1],
+        };
+    }
+
+    const whenMatch = text.match(/^(.*?)\s+((?:\d{4}-\d{2}-\d{2}|\d{2}[/-]\d{2}[/-](?:\d{2}|\d{4}))\s+[0-2]\d:[0-5]\d\s+\S+)$/);
+    return {
+        title: whenMatch ? whenMatch[1].trim() : '',
+        whenInput: whenMatch ? whenMatch[2].trim() : '',
+    };
+}
+
+function planForCreate(createKind, payload) {
+    const { title, whenInput } = parseCreatePayload(payload);
+    const parsedWhen = parseConcreteCommandWhen(whenInput);
+
+    if (!title || !parsedWhen) {
+        return {
+            intent: 'answer',
+            reply: commandCreateUsageReply(createKind),
+            source: 'command',
+        };
+    }
+
+    if (createKind === 'reminder') {
+        return {
+            intent: 'reminder',
+            text: title,
+            date: parsedWhen.date,
+            time: parsedWhen.time,
+            timezone: parsedWhen.timezone,
+            source: 'command',
+            ask: '',
+        };
+    }
+
+    return {
+        intent: 'schedule',
+        title,
+        text: title,
+        date: parsedWhen.date,
+        time: parsedWhen.time,
+        timezone: parsedWhen.timezone,
+        source: 'command',
+        ask: '',
+    };
+}
+
+function parseKindAndTarget(value, { allowAll = false } = {}) {
+    const text = String(value || '').trim();
+    const match = text.match(/^(schedule(?:s)?|meeting(?:s)?|session(?:s)?|reminder(?:s)?|all)\b\s*([\s\S]*)$/i);
+    if (!match) return null;
+
+    const rawKind = match[1].toLowerCase();
+    if (rawKind === 'all' && !allowAll) return null;
+
+    return {
+        rawKind,
+        kind: rawKind === 'all' ? '' : normalizedKind(rawKind, rawKind),
+        target: match[2].trim(),
+    };
+}
+
+function parseManualCommandPlan(body) {
+    const text = String(body || '').trim();
+    const lower = text.toLowerCase();
+
+    if (lower === 'help' || lower === 'commands' || lower === 'command mode') {
+        return {
+            intent: 'answer',
+            reply: COMMAND_HELP,
+            source: 'command',
+        };
+    }
+
+    const createMatch = text.match(/^(?:new|create|add)\s+(schedule|meeting|session|reminder)\s*:\s*([\s\S]+)$/i);
+    if (createMatch) {
+        const createKind = /^reminder$/i.test(createMatch[1]) ? 'reminder' : 'schedule';
+        return planForCreate(createKind, createMatch[2]);
+    }
+
+    const listMatch = text.match(/^(?:show|list)\s+(schedules?|meetings?|sessions?|reminders?|all)\s*$/i);
+    if (listMatch) {
+        const rawKind = listMatch[1].toLowerCase();
+        return {
+            intent: 'list',
+            kind: rawKind === 'all' ? '' : normalizedKind(rawKind, rawKind),
+            target: '',
+            source: 'command',
+        };
+    }
+
+    const cancelMatch = text.match(/^(?:cancel|delete|remove)\s+([\s\S]+)$/i);
+    if (cancelMatch) {
+        const parsed = parseKindAndTarget(cancelMatch[1], { allowAll: true });
+        if (!parsed) {
+            return {
+                intent: 'answer',
+                reply: `Use cancel schedule <id>, cancel reminder <id>, or cancel all, sir.\n\n${COMMAND_HELP}`,
+                source: 'command',
+            };
+        }
+
+        if (!parsed.target && parsed.rawKind !== 'all') {
+            return {
+                intent: 'answer',
+                reply: `Give me the id, sir.\nUse show schedules or show reminders first.`,
+                source: 'command',
+            };
+        }
+
+        return {
+            intent: 'cancel',
+            kind: parsed.kind,
+            target: parsed.target,
+            source: 'command',
+            reply: '',
+        };
+    }
+
+    const doneMatch = text.match(/^(?:done|complete|finish)\s+([\s\S]+)$/i);
+    if (doneMatch) {
+        const parsed = parseKindAndTarget(doneMatch[1]);
+        if (!parsed?.target) {
+            return {
+                intent: 'answer',
+                reply: `Use done schedule <id> or done reminder <id>, sir.\n\n${COMMAND_HELP}`,
+                source: 'command',
+            };
+        }
+
+        return {
+            intent: 'complete',
+            kind: parsed.kind,
+            target: parsed.target,
+            source: 'command',
+        };
+    }
+
+    const moveMatch = text.match(/^(?:move|reschedule|change time)\s+(.+?)\s*:\s*([\s\S]+)$/i);
+    if (moveMatch) {
+        const parsed = parseKindAndTarget(moveMatch[1]);
+        const parsedWhen = parseConcreteCommandWhen(moveMatch[2]);
+        if (!parsed?.target || !parsedWhen) {
+            return {
+                intent: 'answer',
+                reply: `Use move schedule <id>: ${COMMAND_TIME_FORMAT}\nExample: move schedule a1b2c3: 2026-07-09 20:00 America/Chicago`,
+                source: 'command',
+            };
+        }
+
+        return {
+            intent: 'update',
+            kind: parsed.kind,
+            target: parsed.target,
+            date: parsedWhen.date,
+            time: parsedWhen.time,
+            timezone: parsedWhen.timezone,
+            source: 'command',
+        };
+    }
+
+    const renameMatch = text.match(/^(?:rename|retitle|change title)\s+(.+?)\s*:\s*([\s\S]+)$/i);
+    if (renameMatch) {
+        const parsed = parseKindAndTarget(renameMatch[1]);
+        const title = renameMatch[2].trim();
+        if (!parsed?.target || !title) {
+            return {
+                intent: 'answer',
+                reply: 'Use rename schedule <id>: New title or rename reminder <id>: New reminder text, sir.',
+                source: 'command',
+            };
+        }
+
+        return {
+            intent: 'update',
+            kind: parsed.kind,
+            target: parsed.target,
+            title,
+            text: title,
+            source: 'command',
+        };
+    }
+
+    return null;
+}
+
 function parseCommandPlan(rawText) {
     const body = cleanCommandText(rawText);
+    const manualPlan = parseManualCommandPlan(body);
+    if (manualPlan) return manualPlan;
+
     const match = body.match(/(?:^|\s)\/(\w+)\b\s*([\s\S]*)$/);
     if (!match) return null;
 
@@ -239,47 +464,13 @@ function parseCommandPlan(rawText) {
         if (!createMatch) {
             return {
                 intent: 'answer',
-                reply: `Use /create schedule or /create reminder, sir.\n\n${COMMAND_HELP}`,
+                reply: `Use new schedule: ... or new reminder: ..., sir.\n\n${COMMAND_HELP}`,
                 source: 'command',
             };
         }
 
         const createKind = /^reminder/i.test(createMatch[1]) ? 'reminder' : 'schedule';
-        const parts = createMatch[2].split('|').map((part) => part.trim()).filter(Boolean);
-        const title = parts[0] || '';
-        const whenInput = parts.length >= 4 ? `${parts[1]} ${parts[2]} ${parts[3]}` : parts[1] || '';
-        const parsedWhen = parseConcreteCommandWhen(whenInput);
-
-        if (!title || !parsedWhen) {
-            return {
-                intent: 'answer',
-                reply: commandCreateUsageReply(createKind),
-                source: 'command',
-            };
-        }
-
-        if (createKind === 'reminder') {
-            return {
-                intent: 'reminder',
-                text: title,
-                date: parsedWhen.date,
-                time: parsedWhen.time,
-                timezone: parsedWhen.timezone,
-                source: 'command',
-                ask: '',
-            };
-        }
-
-        return {
-            intent: 'schedule',
-            title,
-            text: title,
-            date: parsedWhen.date,
-            time: parsedWhen.time,
-            timezone: parsedWhen.timezone,
-            source: 'command',
-            ask: '',
-        };
+        return planForCreate(createKind, createMatch[2]);
     }
 
     if (command === 'list') {
@@ -287,7 +478,7 @@ function parseCommandPlan(rawText) {
         if (!listMatch) {
             return {
                 intent: 'answer',
-                reply: `Use /list schedules, /list reminders, or /list all, sir.\n\n${COMMAND_HELP}`,
+                reply: `Use show schedules, show reminders, or show all, sir.\n\n${COMMAND_HELP}`,
                 source: 'command',
             };
         }
@@ -308,7 +499,7 @@ function parseCommandPlan(rawText) {
         if (!cancelMatch) {
             return {
                 intent: 'answer',
-                reply: `Use /cancel schedule <id>, /cancel reminder <id>, or /cancel all, sir.\n\n${COMMAND_HELP}`,
+                reply: `Use cancel schedule <id>, cancel reminder <id>, or cancel all, sir.\n\n${COMMAND_HELP}`,
                 source: 'command',
             };
         }
@@ -322,7 +513,7 @@ function parseCommandPlan(rawText) {
         if (!target && cancelKindText !== 'all') {
             return {
                 intent: 'answer',
-                reply: `Give me the id, sir.\nUse /list schedules or /list reminders first.`,
+                reply: `Give me the id, sir.\nUse show schedules or show reminders first.`,
                 source: 'command',
             };
         }

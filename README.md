@@ -300,46 +300,54 @@ If the bot repeatedly asks for QR after deploy, confirm:
 Commands are useful when the LLM provider is unavailable. They use concrete dates only so Charon does not have to guess.
 
 ```text
-/help
-/create schedule | Title | MM/DD/YY HH:MM Area/City
-/create reminder | Text | MM/DD/YY HH:MM Area/City
-/list schedules
-/list reminders
-/list all
-/cancel schedule <id>
-/cancel reminder <id>
-/cancel all
+help
+new schedule: Title, YYYY-MM-DD HH:MM Area/City
+new reminder: Text, YYYY-MM-DD HH:MM Area/City
+show schedules
+show reminders
+show all
+move schedule <id>: YYYY-MM-DD HH:MM Area/City
+move reminder <id>: YYYY-MM-DD HH:MM Area/City
+rename schedule <id>: New title
+rename reminder <id>: New reminder text
+done schedule <id>
+done reminder <id>
+cancel schedule <id>
+cancel reminder <id>
+cancel all
 ```
 
 Examples:
+
+```text
+new schedule: Banking system design, 2026-07-09 20:00 America/Chicago
+new reminder: Submit slides, 2026-07-09 18:30 Asia/Kolkata
+move schedule a1b2c3: 2026-07-10 21:00 America/New_York
+rename reminder d4e5f6: Submit final slides
+```
+
+Command mode intentionally uses concrete dates only. Do not use fuzzy dates like `next Thursday`, `tomorrow`, or `2pm EST` in commands. Use `YYYY-MM-DD`, 24-hour time, and an IANA timezone such as `America/Chicago`, `America/New_York`, `America/Phoenix`, `Europe/London`, or `Asia/Kolkata`.
+
+This also works for compatibility:
 
 ```text
 /create schedule | Banking system design | 07/09/26 20:00 America/Chicago
 /create reminder | Submit slides | 07/09/26 18:30 Asia/Kolkata
 ```
 
-Command mode intentionally uses concrete dates only. Do not use fuzzy dates like `next Thursday`, `tomorrow`, or `2pm EST` in slash commands. Use `MM/DD/YY`, 24-hour time, and an IANA timezone such as `America/Chicago`, `America/New_York`, `America/Phoenix`, `Europe/London`, or `Asia/Kolkata`.
-
-This also works:
-
-```text
-/create schedule | Banking system design | 07/09/26 | 20:00 | America/Chicago
-/create reminder | Submit slides | 07/09/26 | 18:30 | Asia/Kolkata
-```
-
 List active items:
 
 ```text
-/list schedules
-/list reminders
-/list all
+show schedules
+show reminders
+show all
 ```
 
 Cancel by id:
 
 ```text
-/cancel schedule a1b2c3
-/cancel reminder d4e5f6
+cancel schedule a1b2c3
+cancel reminder d4e5f6
 ```
 
 The id appears in list replies as a short bracketed value, like `[a1b2c3]`.
@@ -525,12 +533,13 @@ Enable the Google Meet API in the Google Cloud project connected to your OAuth c
 Natural language planning may fail, but command mode still works:
 
 ```text
-/create schedule | Title | MM/DD/YY HH:MM Area/City
-/create reminder | Text | MM/DD/YY HH:MM Area/City
-/list schedules
-/list reminders
-/cancel schedule <id>
-/cancel reminder <id>
+new schedule: Title, YYYY-MM-DD HH:MM Area/City
+new reminder: Text, YYYY-MM-DD HH:MM Area/City
+show schedules
+show reminders
+move schedule <id>: YYYY-MM-DD HH:MM Area/City
+cancel schedule <id>
+cancel reminder <id>
 ```
 
 ### Bot replies with raw WhatsApp ids
