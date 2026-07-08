@@ -30,6 +30,30 @@ function pollLeader(poll) {
     return pollVoteCounts(poll)[0] || null;
 }
 
+function compactPoll(poll, options = {}) {
+    if (!poll) return null;
+
+    const maxNameChars = options.maxNameChars || 110;
+    const maxOptionChars = options.maxOptionChars || 80;
+    const maxVotes = options.maxVotes || 8;
+    const leader = pollLeader(poll);
+    const counts = new Map(pollVoteCounts(poll).map((vote) => [vote.option, vote.count]));
+
+    return {
+        name: truncateText(poll.pollName, maxNameChars),
+        updatedAt: poll.updatedAt,
+        opts: (poll.options || []).map((option) => ({
+            name: truncateText(option.name, maxOptionChars),
+            n: counts.get(option.name) || 0,
+        })),
+        leader: leader ? { opt: truncateText(leader.option, maxOptionChars), n: leader.count } : null,
+        votes: pollVoteCounts(poll).slice(0, maxVotes).map((vote) => ({
+            opt: truncateText(vote.option, maxOptionChars),
+            n: vote.count,
+        })),
+    };
+}
+
 function compactContext(context, options = {}) {
     const maxTokens = options.maxTokens || 1200;
     const maxMessages = options.maxMessages || 10;
@@ -42,32 +66,44 @@ function compactContext(context, options = {}) {
     const sourceMessages = includeBotMessages
         ? (context.messages || [])
         : (context.messages || []).filter((message) => !message.isFromMe);
+    const pollsByMessageId = new Map((context.polls || [])
+        .filter((poll) => poll.pollMessageId)
+        .map((poll) => [String(poll.pollMessageId), poll]));
 
     let messageLimit = Math.min(maxMessages, sourceMessages.length);
     let textLimit = maxTextChars;
     let compacted = null;
 
     const build = () => {
-        const messages = sourceMessages.slice(-messageLimit).map((message) => ({
-            t: message.timestamp,
-            from: truncateText(message.senderName || message.senderId, 48),
-            msg: truncateText(message.body, textLimit),
-            kind: message.type,
-            me: Boolean(message.isFromMe),
-        }));
-
-        const polls = (context.polls || []).slice(0, maxPolls).map((poll) => {
-            const leader = pollLeader(poll);
-            return {
-            name: truncateText(poll.pollName, 90),
-            opts: (poll.options || []).map((option) => truncateText(option.name, 60)),
-            leader: leader ? { opt: truncateText(leader.option, 60), n: leader.count } : null,
-            votes: pollVoteCounts(poll).slice(0, 5).map((vote) => ({
-                opt: truncateText(vote.option, 60),
-                n: vote.count,
-            })),
+        const messages = sourceMessages.slice(-messageLimit).map((message) => {
+            const poll = pollsByMessageId.get(String(message.messageId || ''));
+            const compactedMessage = {
+                t: message.timestamp,
+                from: truncateText(message.senderName || message.senderId, 48),
+                msg: truncateText(message.body, textLimit),
+                kind: message.type,
+                me: Boolean(message.isFromMe),
             };
+
+            if (poll || message.pollName || message.pollOptions?.length) {
+                compactedMessage.poll = compactPoll(poll || {
+                    pollName: message.pollName || message.body,
+                    options: message.pollOptions || [],
+                    votes: [],
+                    updatedAt: message.updatedAt,
+                }, {
+                    maxNameChars: 90,
+                    maxOptionChars: 60,
+                    maxVotes: 5,
+                });
+            }
+
+            return compactedMessage;
         });
+
+        const polls = (context.polls || [])
+            .slice(0, maxPolls)
+            .map((poll) => compactPoll(poll));
 
         const meetings = (context.meetings || []).slice(0, maxMeetings).map((meeting) => ({
             id: shortId(meeting._id),

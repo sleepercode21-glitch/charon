@@ -123,6 +123,97 @@ function messageText(message) {
     ].filter(Boolean).join(' ');
 }
 
+function optionName(option) {
+    if (typeof option === 'string') return option;
+    return option?.name || option?.localId || String(option || '');
+}
+
+function selectedOptionNamesFromVotes(votes = []) {
+    return votes.flatMap((vote) => (vote.selectedOptions || [])
+        .map(optionName)
+        .filter(Boolean));
+}
+
+function pollOptionsFromRuntimeMessage(message) {
+    return (
+        message.pollOptions
+        || message._data?.pollOptions
+        || message._data?.pollSelectableOptions
+        || []
+    ).map(optionName).filter(Boolean);
+}
+
+function pollOptionsSummary({ message, votes = [], storedPoll = null }) {
+    const optionNames = [
+        ...pollOptionsFromRuntimeMessage(message),
+        ...(storedPoll?.options || []).map(optionName),
+        ...selectedOptionNamesFromVotes(votes),
+        ...((storedPoll?.votes || []).flatMap((vote) => vote.selectedOptions || [])),
+    ]
+        .filter(Boolean);
+
+    const uniqueOptions = [...new Set(optionNames)];
+    const counts = new Map(uniqueOptions.map((option) => [option, 0]));
+
+    const voteRows = votes?.length ? votes : (storedPoll?.votes || []);
+    for (const vote of voteRows) {
+        for (const selected of vote.selectedOptions || []) {
+            const name = optionName(selected);
+            if (!name) continue;
+            counts.set(name, (counts.get(name) || 0) + 1);
+        }
+    }
+
+    return uniqueOptions.map((name) => ({
+        name,
+        votes: counts.get(name) || 0,
+    }));
+}
+
+async function quotedContext(message, chat) {
+    if (!message.hasQuotedMsg || typeof message.getQuotedMessage !== 'function') return null;
+
+    try {
+        const quoted = await message.getQuotedMessage();
+        if (!quoted) return null;
+
+        await storeMessage(quoted, chat);
+
+        let votes = [];
+        if ((quoted.type === 'poll_creation' || quoted.pollName) && typeof quoted.getPollVotes === 'function') {
+            votes = await quoted.getPollVotes();
+            await messageStore.replacePollVotes({ chat, parentMessage: quoted, votes });
+        }
+
+        const storedPoll = await messageStore.findPollByMessageId({
+            chatId: getChatId(chat),
+            pollMessageId: getMessageId(quoted),
+        });
+
+        const context = {
+            id: getMessageId(quoted),
+            type: quoted.type || '',
+            body: messageText(quoted),
+            pollName: quoted.pollName || quoted._data?.pollName || storedPoll?.pollName || '',
+            pollOptions: pollOptionsSummary({ message: quoted, votes, storedPoll }),
+            storedPoll: storedPoll ? {
+                pollName: storedPoll.pollName || '',
+                options: (storedPoll.options || []).map((option) => option.name).filter(Boolean),
+                votes: (storedPoll.votes || []).map((vote) => ({
+                    selectedOptions: vote.selectedOptions || [],
+                    updatedAt: vote.updatedAt,
+                })),
+            } : null,
+            timestamp: quoted.timestamp ? new Date(quoted.timestamp * 1000).toISOString() : '',
+        };
+        logger.info(`Quoted context: ${JSON.stringify(context)}`);
+        return context;
+    } catch (error) {
+        logger.warn('Could not load quoted message context.', error);
+        return null;
+    }
+}
+
 function getMessageId(message) {
     return serializedId(message.id);
 }
@@ -286,6 +377,7 @@ async function handleIncomingMessage(message) {
 
     handledReplyMessageIds.add(messageId);
     logger.info(`Handling addressed ${message.type || 'message'} in ${chat.name || getChatId(chat)}: ${messageText(message) || '[no text]'}`);
+    const quoted = await quotedContext(message, chat);
     await refreshRecentPollVotes(chat);
 
     try {
@@ -293,6 +385,7 @@ async function handleIncomingMessage(message) {
             message,
             chat,
             storedMessage,
+            quoted,
             botContactId,
             client: whatsappClient,
         });

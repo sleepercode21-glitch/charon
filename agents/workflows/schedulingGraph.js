@@ -4,6 +4,7 @@ const { settings } = require('../../config/settings');
 const { createLlmModel } = require('../../models/llmWrapper');
 const { CHARON_SYSTEM_PROMPT } = require('../../models/prompts/charonSystemPrompt');
 const { CHARON_RESPONSE_PROMPT } = require('../../models/prompts/responsePrompt');
+const { CHARON_SITUATION_PROMPT } = require('../../models/prompts/situationPrompt');
 const { extractJson } = require('../../utils/json');
 const { logger } = require('../../utils/logger');
 const { compactContext, estimateTokens } = require('../../utils/tokenBudget');
@@ -20,6 +21,56 @@ const ACTION_INTENTS = new Set(['schedule', 'reminder', 'update', 'cancel', 'com
 const KNOWN_INTENTS = new Set([...ACTION_INTENTS, 'answer', 'refuse']);
 const DB_TOOL_NAMES = new Set(['list_active_items', 'get_active_item']);
 const MAX_DB_TOOL_STEPS = 3;
+const TOOLBELT = [
+    {
+        intent: 'schedule',
+        does: 'Create or reuse a Google Meet session, store it, and let reminder worker notify before it starts.',
+        needs: ['title/topic', 'date', 'time', 'timezone'],
+        outputs: ['schedule id', 'when', 'Meet link'],
+    },
+    {
+        intent: 'reminder',
+        does: 'Create a standalone text reminder for the group.',
+        needs: ['reminder text', 'date', 'time', 'timezone'],
+        outputs: ['reminder id', 'when'],
+    },
+    {
+        intent: 'update',
+        does: 'Change an active meeting or reminder.',
+        needs: ['target id/title/reference', 'new title/text/date/time/timezone'],
+        outputs: ['updated item'],
+    },
+    {
+        intent: 'cancel',
+        does: 'Cancel active meetings and/or reminders.',
+        needs: ['target id/title/reference or kind all'],
+        outputs: ['cancelled counts'],
+    },
+    {
+        intent: 'complete',
+        does: 'Mark an active meeting or reminder done.',
+        needs: ['target id/title/reference'],
+        outputs: ['completed item'],
+    },
+    {
+        intent: 'list',
+        does: 'List active meetings/reminders, counts, ids, times, and links.',
+        needs: ['kind or target when known'],
+        outputs: ['active item summaries'],
+    },
+    {
+        intent: 'announce',
+        does: 'Tag everyone in the group with a message.',
+        needs: ['announcement text'],
+        outputs: ['announcement sent'],
+    },
+    {
+        intent: 'answer',
+        does: 'Chat, explain, joke, summarize, brainstorm, answer technical questions, or describe Charon.',
+        needs: ['useful reply substance'],
+        outputs: ['reply'],
+    },
+];
 
 const COMMAND_TIME_FORMAT = 'MM/DD/YY HH:MM Area/City';
 const COMMAND_SCHEDULE_USAGE = `/create schedule | Title | ${COMMAND_TIME_FORMAT}`;
@@ -29,25 +80,25 @@ const COMMAND_REMINDER_EXAMPLE = '/create reminder | Submit slides | 07/09/26 18
 const COMMAND_HELP = [
     'Charon command mode, sir:',
     '',
-    'Create',
+    'Create:',
     COMMAND_SCHEDULE_USAGE,
     COMMAND_REMINDER_USAGE,
     '',
-    'Examples',
+    'Examples:',
     COMMAND_SCHEDULE_EXAMPLE,
     COMMAND_REMINDER_EXAMPLE,
     '',
-    'List',
+    'List:',
     '/list schedules',
     '/list reminders',
     '/list all',
     '',
-    'Cancel',
+    'Cancel:',
     '/cancel schedule <id>',
     '/cancel reminder <id>',
     '/cancel all',
     '',
-    'Help',
+    'Help:',
     '/help',
     '',
     'Time must be concrete:',
@@ -57,6 +108,7 @@ const COMMAND_HELP = [
 const CharonState = Annotation.Root({
     input: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
     context: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
+    situation: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
     plan: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
     decision: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
     timeResolution: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
@@ -302,19 +354,125 @@ function normalizedIntent(value) {
     return KNOWN_INTENTS.has(intent) ? intent : 'answer';
 }
 
+function normalizedSituationIntent(value) {
+    const intent = String(value || '').toLowerCase();
+    return KNOWN_INTENTS.has(intent) ? intent : '';
+}
+
 function normalizedKind(value, text = '') {
     const raw = String(value || '').toLowerCase();
-    if (['meeting', 'meetings', 'meet', 'schedule', 'schedules', 'session', 'sessions'].includes(raw)) return 'meeting';
+    const body = String(text || '').toLowerCase();
+    const hasReminder = /\breminders?\b/.test(body);
+    const hasMeeting = /\b(meetings?|meeings?|meets?|sessions?)\b/.test(body);
+
+    if (raw.includes('|') && raw.includes('meeting') && raw.includes('reminder')) {
+        if (hasReminder && !hasMeeting) return 'reminder';
+        if (hasMeeting && !hasReminder) return 'meeting';
+        return null;
+    }
+    if (['meeting', 'meetings', 'meeing', 'meeings', 'meet', 'meets', 'schedule', 'schedules', 'session', 'sessions'].includes(raw)) return 'meeting';
     if (['reminder', 'reminders'].includes(raw)) return 'reminder';
     if (['all', 'both', 'everything', ''].includes(raw)) {
-        const body = String(text || '').toLowerCase();
-        const hasReminder = /\breminders?\b/.test(body);
-        const hasMeeting = /\b(meetings?|meets?|sessions?)\b/.test(body);
         if (hasReminder && !hasMeeting) return 'reminder';
         if (hasMeeting && !hasReminder) return 'meeting';
         return null;
     }
     return null;
+}
+
+function cleanHint(value, max = 220) {
+    return trimText(value, max);
+}
+
+function comparableWords(value) {
+    return String(value || '')
+        .toLowerCase()
+        .replace(/@\d+(?:@\S+)?/g, ' ')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .split(/\s+/)
+        .filter((word) => word.length > 2);
+}
+
+function wordOverlapScore(left, right) {
+    const leftWords = new Set(comparableWords(left));
+    const rightWords = new Set(comparableWords(right));
+    if (leftWords.size === 0 || rightWords.size === 0) return 1;
+
+    let overlap = 0;
+    for (const word of leftWords) {
+        if (rightWords.has(word)) overlap += 1;
+    }
+
+    return overlap / Math.min(leftWords.size, rightWords.size);
+}
+
+function situationDetachedFromCurrentMessage(situation, body) {
+    const ask = String(situation?.currentAsk || '').trim();
+    const current = String(body || '').trim();
+    if (!ask || !current) return false;
+
+    const normalizedAsk = comparableWords(ask).join(' ');
+    const normalizedCurrent = comparableWords(current).join(' ');
+    if (!normalizedAsk || !normalizedCurrent) return false;
+    if (normalizedAsk.includes(normalizedCurrent) || normalizedCurrent.includes(normalizedAsk)) return false;
+
+    return wordOverlapScore(normalizedAsk, normalizedCurrent) < 0.35;
+}
+
+function fillPlanFromSituation(plan, situation) {
+    const next = { ...plan };
+    const intent = normalizedSituationIntent(situation?.primaryIntent);
+    const kindHint = normalizedKind(situation?.kindHint, situation?.kindHint) || String(situation?.kindHint || '');
+    const existingKind = normalizedKind(next.kind, next.kind);
+
+    if (!next.title && situation?.titleHint) next.title = cleanHint(situation.titleHint, 120);
+    if (!next.text && situation?.textHint) next.text = cleanHint(situation.textHint, 220);
+    if (!next.target && situation?.targetHint) next.target = cleanHint(situation.targetHint, 120);
+    if (!next.date && situation?.dateHint) next.date = cleanHint(situation.dateHint, 80);
+    if (!next.time && situation?.timeHint) next.time = cleanHint(situation.timeHint, 80);
+    if (!next.timezone && situation?.timezoneHint) next.timezone = cleanHint(situation.timezoneHint, 80);
+    if (existingKind) next.kind = existingKind;
+    if (!existingKind && kindHint) next.kind = kindHint;
+
+    if (intent === 'reminder' && !next.text) {
+        next.text = cleanHint(situation?.titleHint || situation?.currentAsk || next.title || 'Reminder', 220);
+    }
+
+    if (intent === 'schedule' && !next.title) {
+        next.title = cleanHint(situation?.textHint || situation?.currentAsk || 'Tech Up session', 120);
+    }
+
+    return next;
+}
+
+function alignPlanWithSituation(plan, situation) {
+    const situationIntent = normalizedSituationIntent(situation?.primaryIntent);
+    const confidence = Number(situation?.confidence || 0);
+    if (!situationIntent || confidence < 0.72) return plan;
+
+    const plannerIntent = normalizedIntent(plan.intent);
+    if (plannerIntent === situationIntent) {
+        return fillPlanFromSituation(plan, situation);
+    }
+
+    if (['cancel', 'update', 'complete', 'list', 'announce'].includes(plannerIntent)) {
+        return plan;
+    }
+
+    const canSituationOverride = (
+        ['answer', 'refuse'].includes(plannerIntent) && ACTION_INTENTS.has(situationIntent)
+    ) || (
+        ['schedule', 'reminder'].includes(plannerIntent)
+        && ['schedule', 'reminder', 'cancel', 'update', 'complete', 'list'].includes(situationIntent)
+    );
+
+    if (!canSituationOverride) return plan;
+
+    return fillPlanFromSituation({
+        ...plan,
+        intent: situationIntent,
+        source: `${plan.source || 'llm'}+situation`,
+    }, situation);
 }
 
 function normalizedToolKind(value) {
@@ -395,15 +553,15 @@ function compactForPlanner(context, message) {
         maxTokens: settings.llm.contextTokenBudget,
         maxMessages: settings.llm.maxContextMessages,
         minMessages: 4,
-        maxTextChars: 140,
-        maxPolls: 3,
-        maxMeetings: 5,
-        maxReminders: 5,
-        includeBotMessages: false,
+        maxTextChars: 180,
+        maxPolls: settings.llm.maxContextPolls,
+        maxMeetings: 8,
+        maxReminders: 8,
+        includeBotMessages: true,
     });
 }
 
-function plannerPayload({ input, context }) {
+function plannerPayload({ input, context, situation = null }) {
     const message = input.message;
     const compact = compactForPlanner(context, message);
     const body = messageText(message);
@@ -411,9 +569,25 @@ function plannerPayload({ input, context }) {
     return JSON.stringify({
         now: currentDateContext(input.timezone),
         defaultTz: input.timezone,
+        room: {
+            chatId: chatId(input.chat),
+            chatName: input.chat?.name || '',
+            replyMode: settings.whatsapp.replyMode,
+            groupScope: settings.whatsapp.groupScope,
+        },
+        message: {
+            id: message?.id?._serialized || message?.id || '',
+            type: message?.type || '',
+            timestamp: message?.timestamp ? new Date(message.timestamp * 1000).toISOString() : '',
+            author: message?.author || message?.from || '',
+            fromMe: Boolean(message?.fromMe),
+        },
+        quoted: input.quoted || null,
         requester: input.storedMessage?.senderName || message.author || message.from || 'unknown',
         msg: body,
         pending: pendingClarification(context, message),
+        situation,
+        toolbelt: TOOLBELT,
         ctx: JSON.parse(compact.json),
         budget: {
             ctxTokens: compact.estimatedTokens,
@@ -422,8 +596,17 @@ function plannerPayload({ input, context }) {
     });
 }
 
-function plannerLoopPayload({ input, context, dbResults }) {
+function situationPayload({ input, context }) {
     const base = JSON.parse(plannerPayload({ input, context }));
+    delete base.situation;
+    return JSON.stringify({
+        ...base,
+        objective: 'Read the current room state and classify what Charon should do next. Do not call tools.',
+    });
+}
+
+function plannerLoopPayload({ input, context, dbResults, situation }) {
+    const base = JSON.parse(plannerPayload({ input, context, situation }));
     return JSON.stringify({
         ...base,
         db: dbResults,
@@ -492,6 +675,86 @@ async function runPlannerDbTool({ toolCall, chatId: id, messageStore }) {
         },
         count: items.length,
         items: items.slice(0, limit).map(dbItemSummary),
+    };
+}
+
+function dbToolKey(toolCall) {
+    const tool = String(toolCall?.tool || '');
+    const args = toolCall?.args || {};
+    return JSON.stringify({
+        tool,
+        kind: normalizedToolKind(args.kind) || 'all',
+        target: String(args.target || '').trim().toLowerCase(),
+        limit: tool === 'get_active_item' ? 1 : Math.min(Number(args.limit) || 5, 5),
+    });
+}
+
+function planFromRepeatedDbTool(dbResults) {
+    const result = [...dbResults].reverse().find((item) => item?.ok && item.items?.[0]);
+    const item = result?.items?.[0];
+    if (!item) {
+        return {
+            intent: 'answer',
+            reply: 'I already checked that database path, sir. Send me the schedule or reminder id and I will act on it.',
+        };
+    }
+
+    return {
+        intent: 'list',
+        kind: item.kind || result.args?.kind || 'all',
+        target: item.id || result.args?.target || '',
+        reply: '',
+    };
+}
+
+function fallbackSituation(body) {
+    return {
+        primaryIntent: 'answer',
+        confidence: 0.45,
+        currentAsk: trimText(body, 220),
+        focus: 'current_message',
+        useQuoted: false,
+        needsDb: false,
+        titleHint: '',
+        textHint: trimText(body, 220),
+        targetHint: '',
+        dateHint: '',
+        timeHint: '',
+        timezoneHint: '',
+        kindHint: '',
+        missing: '',
+        ignore: '',
+        why: 'Fallback situation after unreadable LLM output.',
+    };
+}
+
+function normalizeSituation(raw, body) {
+    const situation = raw && typeof raw === 'object' ? raw : {};
+    const detached = situationDetachedFromCurrentMessage(situation, body);
+    const intent = detached ? 'answer' : normalizedSituationIntent(situation.primaryIntent) || 'answer';
+    const confidence = Math.max(0, Math.min(1, Number(situation.confidence || 0)));
+
+    if (detached) {
+        logger.warn(`Situation output looked stale; demoting it. current="${trimText(body, 90)}" situationAsk="${trimText(situation.currentAsk, 90)}"`);
+    }
+
+    return {
+        primaryIntent: intent,
+        confidence: detached ? Math.min(confidence, 0.35) : confidence,
+        currentAsk: cleanHint(detached ? body : situation.currentAsk || body, 240),
+        focus: cleanHint(detached ? 'current_message' : situation.focus || 'current_message', 60),
+        useQuoted: detached ? false : Boolean(situation.useQuoted),
+        needsDb: detached ? false : Boolean(situation.needsDb),
+        titleHint: cleanHint(detached ? '' : situation.titleHint || '', 140),
+        textHint: cleanHint(detached ? '' : situation.textHint || '', 260),
+        targetHint: cleanHint(detached ? '' : situation.targetHint || '', 160),
+        dateHint: cleanHint(detached ? '' : situation.dateHint || '', 80),
+        timeHint: cleanHint(detached ? '' : situation.timeHint || '', 80),
+        timezoneHint: cleanHint(detached ? '' : situation.timezoneHint || '', 80),
+        kindHint: cleanHint(detached ? '' : situation.kindHint || '', 40),
+        missing: cleanHint(situation.missing || '', 140),
+        ignore: cleanHint(detached ? 'stale situation output ignored' : situation.ignore || '', 180),
+        why: cleanHint(detached ? 'Situation currentAsk did not match the actual current message.' : situation.why || '', 220),
     };
 }
 
@@ -695,6 +958,7 @@ function routeAfterPlan(state) {
 function responsePayload(state) {
     return JSON.stringify({
         msg: messageText(state.input.message),
+        situation: state.situation,
         intent: state.decision.intent,
         plan: state.plan,
         result: state.actionResult,
@@ -703,14 +967,35 @@ function responsePayload(state) {
 }
 
 function sanitizeReply(reply) {
-    return String(reply || '')
+    const urls = [];
+    const withPlaceholders = String(reply || '').replace(/https?:\/\/\S+/g, (url) => {
+        const key = `__URL_${urls.length}__`;
+        urls.push(url.replace(/[),.;!?]+$/, (suffix) => {
+            urls.trailing = urls.trailing || {};
+            urls.trailing[key] = suffix;
+            return '';
+        }));
+        return key;
+    });
+
+    const cleaned = withPlaceholders
         .replace(/@\d{5,}(?:@\S+)?/g, 'sir')
         .replace(/\b\d{5,}@(c\.us|lid|s\.whatsapp\.net)\b/g, 'sir')
         .replace(/\bsir\s+sir\b/gi, 'sir')
-        .replace(/\s+([,.;!?])/g, '$1')
-        .replace(/([,.;!?])([^\s])/g, '$1 $2')
-        .replace(/\s+/g, ' ')
+        .split(/\r?\n/)
+        .map((line) => line
+            .replace(/[ \t]+([,.;!?])/g, '$1')
+            .replace(/([,.;!?])([^\s])/g, '$1 $2')
+            .replace(/[ \t]+/g, ' ')
+            .trim())
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n')
         .trim();
+
+    return cleaned.replace(/__URL_(\d+)__/g, (match, index) => {
+        const suffix = urls.trailing?.[match] || '';
+        return `${urls[Number(index)] || match}${suffix}`;
+    });
 }
 
 function inventedOperationalReply(state, reply) {
@@ -749,6 +1034,10 @@ function fallbackReply(state) {
 
     if (result.status === 'scheduled' && result.type === 'meeting') {
         return `Booked, sir: ${result.title} [${result.id || 'new'}] at ${result.when}.${result.meetLink ? ` Meet: ${result.meetLink}` : ''}`;
+    }
+
+    if (result.status === 'existing' && result.type === 'meeting') {
+        return `Already booked, sir: ${result.title} [${result.id || 'existing'}] at ${result.when}.${result.meetLink ? ` Meet: ${result.meetLink}` : ''}`;
     }
 
     if (result.status === 'scheduled' && result.type === 'reminder') {
@@ -821,7 +1110,8 @@ function createSchedulingGraph({ messageStore }) {
             ask: String(rawPlan.ask || ''),
             source: String(rawPlan.source || 'llm'),
         };
-        const repairedPlan = repairAnswerPlan(plan, body);
+        const situatedPlan = alignPlanWithSituation(plan, state.situation);
+        const repairedPlan = repairAnswerPlan(situatedPlan, body);
         const decision = planToDecision(repairedPlan, body);
         const timeResolution = timeResolutionForPlan(repairedPlan, body);
 
@@ -836,11 +1126,65 @@ function createSchedulingGraph({ messageStore }) {
         };
     }
 
+    async function situationNode(state) {
+        const body = messageText(state.input.message);
+        const context = Object.keys(state.context || {}).length > 0
+            ? state.context
+            : await messageStore.recentContext(chatId(state.input.chat));
+
+        const commandPlan = parseCommandPlan(body);
+        if (commandPlan) {
+            const situation = normalizeSituation({
+                primaryIntent: commandPlan.intent,
+                confidence: 1,
+                currentAsk: body,
+                focus: 'current_message',
+                useQuoted: false,
+                needsDb: false,
+                titleHint: commandPlan.title || '',
+                textHint: commandPlan.text || commandPlan.reply || '',
+                targetHint: commandPlan.target || '',
+                dateHint: commandPlan.date || '',
+                timeHint: commandPlan.time || '',
+                timezoneHint: commandPlan.timezone || '',
+                kindHint: commandPlan.kind || '',
+                why: 'Slash command parsed deterministically.',
+            }, body);
+            logJson('Situation parsed', situation);
+            return { context, situation, nextStep: 'planner' };
+        }
+
+        if (!model) model = createLlmModel();
+
+        const payload = situationPayload({ input: state.input, context });
+        const estimated = estimateTokens(CHARON_SITUATION_PROMPT) + estimateTokens(payload);
+        try {
+            const response = await model.invoke([
+                new SystemMessage(CHARON_SITUATION_PROMPT),
+                new HumanMessage(payload),
+            ], { json: true, maxOutputTokens: settings.llm.situationMaxOutputTokens });
+
+            logModelUsage('Situation', response, estimated);
+            logJson('Situation raw', response.content);
+
+            const situation = normalizeSituation(safeJson(response.content) || fallbackSituation(body), body);
+            logJson('Situation parsed', situation);
+            return { context, situation, nextStep: 'planner' };
+        } catch (error) {
+            logger.warn('Situation reader failed; planner will continue with raw context.', error);
+            const situation = fallbackSituation(body);
+            logJson('Situation fallback', situation);
+            return { context, situation, nextStep: 'planner' };
+        }
+    }
+
     async function planNode(state) {
         const body = messageText(state.input.message);
         const commandPlan = parseCommandPlan(body);
         if (commandPlan) {
-            const context = await messageStore.recentContext(chatId(state.input.chat));
+            const context = Object.keys(state.context || {}).length > 0
+                ? state.context
+                : await messageStore.recentContext(chatId(state.input.chat));
             logJson('Command plan', commandPlan);
             return stateFromPlan({ state, context, rawPlan: commandPlan });
         }
@@ -848,11 +1192,19 @@ function createSchedulingGraph({ messageStore }) {
         if (!model) model = createLlmModel();
 
         const id = chatId(state.input.chat);
-        const context = await messageStore.recentContext(id);
+        const context = Object.keys(state.context || {}).length > 0
+            ? state.context
+            : await messageStore.recentContext(id);
         const dbResults = [];
+        const seenDbToolCalls = new Set();
         try {
             for (let step = 0; step <= MAX_DB_TOOL_STEPS; step += 1) {
-                const payload = plannerLoopPayload({ input: state.input, context, dbResults });
+                const payload = plannerLoopPayload({
+                    input: state.input,
+                    context,
+                    dbResults,
+                    situation: state.situation,
+                });
                 const estimated = estimateTokens(CHARON_SYSTEM_PROMPT) + estimateTokens(payload);
                 const response = await model.invoke([
                     new SystemMessage(CHARON_SYSTEM_PROMPT),
@@ -868,6 +1220,17 @@ function createSchedulingGraph({ messageStore }) {
                 };
 
                 if (parsed.tool) {
+                    const key = dbToolKey(parsed);
+                    if (seenDbToolCalls.has(key)) {
+                        logger.warn(`Planner repeated DB tool call; ending loop with existing DB result. key=${key}`);
+                        return stateFromPlan({
+                            state,
+                            context,
+                            rawPlan: planFromRepeatedDbTool(dbResults),
+                        });
+                    }
+                    seenDbToolCalls.add(key);
+
                     if (step >= MAX_DB_TOOL_STEPS) {
                         return stateFromPlan({
                             state,
@@ -908,7 +1271,7 @@ function createSchedulingGraph({ messageStore }) {
                 context,
                 rawPlan: {
                     intent: 'answer',
-                    reply: `LLM credits or service are unavailable, sir.\n${COMMAND_HELP}`,
+                    reply: `LLM credits or service are unavailable, sir.\n\n${COMMAND_HELP}`,
                     source: 'command_fallback',
                 },
             });
@@ -1006,10 +1369,12 @@ function createSchedulingGraph({ messageStore }) {
     }
 
     return new StateGraph(CharonState)
+        .addNode('situation_reader', situationNode)
         .addNode('planner', planNode)
         .addNode('tool_runner', toolsNode)
         .addNode('responder', respondNode)
-        .addEdge(START, 'planner')
+        .addEdge(START, 'situation_reader')
+        .addEdge('situation_reader', 'planner')
         .addConditionalEdges('planner', routeAfterPlan, {
             tools: 'tool_runner',
             respond: 'responder',

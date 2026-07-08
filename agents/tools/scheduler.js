@@ -7,23 +7,6 @@ const {
     parseDate,
 } = require('../../utils/time');
 
-function winnerFromPolls(polls) {
-    for (const poll of polls || []) {
-        const counts = new Map();
-        for (const vote of poll.votes || []) {
-            for (const option of vote.selectedOptions || []) {
-                counts.set(option, (counts.get(option) || 0) + 1);
-            }
-        }
-
-        if (counts.size === 0) continue;
-
-        return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
-    }
-
-    return null;
-}
-
 function emailAttendees(attendees = []) {
     return [...new Set(attendees
         .map((attendee) => {
@@ -41,6 +24,11 @@ function shortId(value) {
     return String(value || '').slice(-6);
 }
 
+function usefulTitle(value) {
+    const text = String(value || '').trim();
+    return text && text.toLowerCase() !== 'tech up meetup';
+}
+
 async function scheduleMeeting({ decision, timeResolution, context, chat, triggerMessage, messageStore }) {
     if (timeResolution?.status === 'needs_clarification') {
         return {
@@ -51,7 +39,6 @@ async function scheduleMeeting({ decision, timeResolution, context, chat, trigge
         };
     }
 
-    const pollWinner = winnerFromPolls(context?.polls);
     const meeting = decision.meeting || {};
     const resolvedStart = timeResolution?.status === 'resolved' ? timeResolution.start : null;
     const resolvedEnd = timeResolution?.status === 'resolved' ? timeResolution.end : null;
@@ -60,14 +47,13 @@ async function scheduleMeeting({ decision, timeResolution, context, chat, trigge
 
     const timezone = normalizeTimezone(resolvedTimezone || meeting.timezone, extractTimezone(sourceText, settings.timezone));
     const start = parseDate(resolvedStart, new Date(), timezone)
-        || parseDate(meeting.start, new Date(), timezone)
-        || parseDate(pollWinner, new Date(), timezone);
+        || parseDate(meeting.start, new Date(), timezone);
 
     if (!start) {
         return {
             status: 'failed',
             need: 'meeting_time',
-            reason: 'No schedulable time found in decision or poll context.',
+            reason: 'No schedulable time found in the LLM decision.',
         };
     }
 
@@ -93,9 +79,40 @@ async function scheduleMeeting({ decision, timeResolution, context, chat, trigge
     const descriptionLines = [
         meeting.description || 'Scheduled from the Tech Up WhatsApp group.',
         timeResolution?.source ? `Time source: ${timeResolution.source}` : null,
-        pollWinner ? `Poll winner: ${pollWinner}` : null,
         `Triggered by WhatsApp message ${triggerMessage.id?._serialized || triggerMessage.id || ''}`,
     ].filter(Boolean);
+
+    const duplicate = await messageStore.findDuplicateMeeting?.({
+        chatId: chat.id?._serialized || chat.id,
+        title,
+        start,
+    });
+
+    if (duplicate) {
+        let existing = duplicate;
+        if (usefulTitle(title) && duplicate.title !== title) {
+            const updated = await messageStore.updateActiveItem?.({
+                chatId: chat.id?._serialized || chat.id,
+                target: shortId(duplicate._id),
+                updates: {
+                    title,
+                    description: descriptionLines.join('\n'),
+                },
+            });
+            existing = updated?.item || duplicate;
+        }
+
+        return {
+            status: 'existing',
+            type: 'meeting',
+            id: shortId(existing._id),
+            title: existing.title || title,
+            when: formatForChat(existing.start, existing.timezone || timezone),
+            meetLink: existing.meetLink || '',
+            meetingCode: existing.meetingCode || '',
+            attendeeCount: existing.attendees?.length || 0,
+        };
+    }
 
     const meetResult = await createGoogleMeetSpace();
 

@@ -10,7 +10,12 @@ function serializedIds(values) {
 }
 
 function pollOptionsFromMessage(message) {
-    return (message.pollOptions || []).map((option) => {
+    const options = message.pollOptions
+        || message._data?.pollOptions
+        || message._data?.pollSelectableOptions
+        || [];
+
+    return options.map((option) => {
         if (typeof option === 'string') return { name: option };
         return {
             name: option.name || option.localId || String(option),
@@ -223,15 +228,20 @@ function createMessageStore({ mongoose }) {
     }
 
     async function recentPolls(chatId, limit = 5) {
-        return Poll.find({ chatId }).sort({ updatedAt: -1 }).limit(limit).lean();
+        return Poll.find({ chatId }).sort({ createdAt: -1, updatedAt: -1 }).limit(limit).lean();
+    }
+
+    async function findPollByMessageId({ chatId, pollMessageId }) {
+        if (!pollMessageId) return null;
+        return Poll.findOne({ chatId, pollMessageId }).lean();
     }
 
     async function recentContext(chatId, limit = 80) {
         const [messages, polls, meetings, reminders] = await Promise.all([
             WhatsAppMessage.find({ chatId }).sort({ timestamp: -1 }).limit(limit).lean(),
-            Poll.find({ chatId }).sort({ updatedAt: -1 }).limit(10).lean(),
-            Meeting.find({ chatId }).sort({ createdAt: -1 }).limit(5).lean(),
-            StandaloneReminder.find({ chatId }).sort({ createdAt: -1 }).limit(5).lean(),
+            Poll.find({ chatId }).sort({ createdAt: -1, updatedAt: -1 }).limit(10).lean(),
+            Meeting.find({ chatId }).sort({ createdAt: -1 }).limit(12).lean(),
+            StandaloneReminder.find({ chatId }).sort({ createdAt: -1 }).limit(12).lean(),
         ]);
 
         return {
@@ -274,6 +284,41 @@ function createMessageStore({ mongoose }) {
 
     async function createMeeting(meeting) {
         return Meeting.create(meeting);
+    }
+
+    async function findDuplicateMeeting({ chatId, title, start, windowMs = 60 * 1000 }) {
+        if (!chatId || !start) return null;
+        const when = new Date(start);
+        if (Number.isNaN(when.getTime())) return null;
+
+        const timeWindow = {
+            chatId,
+            status: { $in: ['draft', 'scheduled'] },
+            start: {
+                $gte: new Date(when.getTime() - windowMs),
+                $lte: new Date(when.getTime() + windowMs),
+            },
+        };
+
+        if (!title) {
+            return Meeting.findOne(timeWindow).sort({ createdAt: -1 }).lean();
+        }
+
+        const exactTitle = await Meeting.findOne({
+            ...timeWindow,
+            title: new RegExp(`^${escapeRegex(title)}$`, 'i'),
+        }).sort({ createdAt: -1 }).lean();
+
+        if (exactTitle) return exactTitle;
+
+        return Meeting.findOne({
+            chatId,
+            status: { $in: ['draft', 'scheduled'] },
+            start: {
+                $gte: new Date(when.getTime() - windowMs),
+                $lte: new Date(when.getTime() + windowMs),
+            },
+        }).sort({ createdAt: -1 }).lean();
     }
 
     async function pendingReminders({ now, leadMinutes, dueGraceMs }) {
@@ -664,9 +709,11 @@ function createMessageStore({ mongoose }) {
         recordPollVote,
         replacePollVotes,
         recentPolls,
+        findPollByMessageId,
         recentContext,
         hasOpenClarification,
         createMeeting,
+        findDuplicateMeeting,
         createStandaloneReminder,
         pendingReminders,
         markReminderSent,

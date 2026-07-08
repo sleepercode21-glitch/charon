@@ -6,12 +6,14 @@ class CharonAgent {
         this.graph = createSchedulingGraph({ messageStore });
     }
 
-    async handleMessage({ message, chat, storedMessage, botContactId }) {
+    async handleMessage({ message, chat, storedMessage, quoted, botContactId, client }) {
         const result = await invokeSchedulingGraph(this.graph, {
             message,
             chat,
             storedMessage,
+            quoted,
             botContactId,
+            client,
             timezone: settings.timezone,
         });
 
