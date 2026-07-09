@@ -15,6 +15,15 @@ function estimateMessagesTokens(messages) {
     return messages.reduce((total, message) => total + estimateTokens(langchainContent(message)), 0);
 }
 
+function estimateRequestCapacity({ model, inputTokens, outputTokens }) {
+    const rawEstimate = inputTokens + outputTokens;
+    if (model !== settings.llm.plannerModel) return rawEstimate;
+
+    const multiplier = Math.max(settings.llm.plannerTokenEstimateMultiplier || 1, 1);
+    const minimum = Math.max(settings.llm.plannerMinRequestTokens || 0, 0);
+    return Math.max(Math.ceil(rawEstimate * multiplier), minimum);
+}
+
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -175,7 +184,14 @@ function createGroqChatModel(model, apiKey) {
             if (maxCallInputTokens > 0 && estimatedInputTokens > maxCallInputTokens) {
                 throw new Error(`llm_call_input_too_large estimated=${estimatedInputTokens} limit=${maxCallInputTokens}`);
             }
-            const estimatedRequestTokens = estimatedInputTokens + maxOutputTokens;
+            const estimatedRequestTokens = estimateRequestCapacity({
+                model,
+                inputTokens: estimatedInputTokens,
+                outputTokens: maxOutputTokens,
+            });
+            if (estimatedRequestTokens > estimatedInputTokens + maxOutputTokens) {
+                logger.info(`Planner capacity overestimate raw=${estimatedInputTokens + maxOutputTokens} guarded=${estimatedRequestTokens}.`);
+            }
             const reservation = await reserveLlmCapacity({ estimatedTokens: estimatedRequestTokens, model });
             const requestBody = JSON.stringify({
                 model,
@@ -189,7 +205,7 @@ function createGroqChatModel(model, apiKey) {
             });
 
             let parsed = null;
-            for (let attempt = 0; attempt < 2; attempt += 1) {
+            for (let attempt = 0; attempt < 3; attempt += 1) {
                 const response = await fetch(GROQ_CHAT_COMPLETIONS_URL, {
                     method: 'POST',
                     headers: {
@@ -209,8 +225,8 @@ function createGroqChatModel(model, apiKey) {
                 if (response.ok) break;
 
                 const delayMs = retryDelayFromGroq({ response, parsed });
-                if ((response.status === 429 || response.status === 503) && attempt === 0 && delayMs > 0 && delayMs <= 65_000) {
-                    logger.warn(`Groq asked Charon to wait ${Math.ceil(delayMs / 1000)}s for ${model}; retrying once.`);
+                if ((response.status === 429 || response.status === 503) && attempt < 2 && delayMs > 0 && delayMs <= 65_000) {
+                    logger.warn(`Groq asked Charon to wait ${Math.ceil(delayMs / 1000)}s for ${model}; retrying (${attempt + 1}/2).`);
                     await sleep(delayMs + 250);
                     continue;
                 }
@@ -267,4 +283,4 @@ function createLlmModel(modelOverride = null, purpose = 'response') {
     };
 }
 
-module.exports = { createLlmModel };
+module.exports = { createLlmModel, estimateRequestCapacity };

@@ -186,9 +186,11 @@ GROQ_PLANNER_API_KEY=
 GROQ_RESPONSE_API_KEY=
 LLM_MAX_OUTPUT_TOKENS=384
 LLM_MAX_CALL_INPUT_TOKENS=24000
-LLM_PLANNER_MAX_INPUT_TOKENS=2400
+LLM_PLANNER_MAX_INPUT_TOKENS=2000
 LLM_PLANNER_RETRY_INPUT_TOKENS=1900
-LLM_PLAN_MAX_OUTPUT_TOKENS=4096
+LLM_PLANNER_TOKEN_ESTIMATE_MULTIPLIER=2.5
+LLM_PLANNER_MIN_REQUEST_TOKENS=6500
+LLM_PLAN_MAX_OUTPUT_TOKENS=800
 LLM_RESPONSE_MAX_OUTPUT_TOKENS=1024
 LLM_MAX_SEQUENCE_ACTIONS=0
 LLM_SEQUENCE_RESPONSE_MAX_STEPS=12
@@ -199,7 +201,7 @@ LLM_MAX_CONTEXT_MESSAGES=30
 LLM_MAX_CONTEXT_POLLS=8
 LLM_TOKENS_PER_MINUTE=5200
 LLM_REQUESTS_PER_MINUTE=25
-LLM_PLANNER_TOKENS_PER_MINUTE=60000
+LLM_PLANNER_TOKENS_PER_MINUTE=30000
 LLM_PLANNER_REQUESTS_PER_MINUTE=25
 LLM_RATE_SAFETY_MULTIPLIER=1.35
 LLM_MIN_REQUEST_INTERVAL_MS=1750
@@ -214,6 +216,12 @@ prompt—not just conversation history. If Compound returns HTTP 413, Charon aut
 using `LLM_PLANNER_RETRY_INPUT_TOKENS` and a leaner context containing fewer messages, polls, and active
 item details. The current request, clock, pending clarification, exact active counts, and reference
 signals are retained.
+
+Compound may reserve substantially more underlying-model capacity than the visible prompt estimate.
+`LLM_PLANNER_TOKEN_ESTIMATE_MULTIPLIER` deliberately inflates local accounting, while
+`LLM_PLANNER_MIN_REQUEST_TOKENS` establishes a conservative floor. The defaults reserve at least
+6,500 tokens before the normal safety multiplier and use the 30K TPM ceiling reported by the
+underlying Scout model. This trades some latency for fewer provider-side 429 responses.
 
 ### Google Meet
 

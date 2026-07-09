@@ -1300,7 +1300,7 @@ function createSchedulingGraph({ messageStore }) {
                     input: state.input,
                     context,
                     inputTokenBudget,
-                    lean: attempt > 0,
+                    lean: attempt > 0 || inputTokenBudget <= 2200,
                 });
                 logger.info(`Planner payload attempt=${attempt + 1} estimated=${built.estimatedTokens} context=${built.contextTokens} budget=${inputTokenBudget}.`);
 

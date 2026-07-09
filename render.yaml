@@ -26,7 +26,7 @@ services:
       - key: LLM_MAX_OUTPUT_TOKENS
         value: "512"
       - key: LLM_PLAN_MAX_OUTPUT_TOKENS
-        value: "4096"
+        value: "800"
       - key: LLM_RESPONSE_MAX_OUTPUT_TOKENS
         value: "1024"
       - key: LLM_MAX_SEQUENCE_ACTIONS
@@ -38,13 +38,19 @@ services:
       - key: LLM_MAX_CALL_INPUT_TOKENS
         value: "24000"
       - key: LLM_PLANNER_MAX_INPUT_TOKENS
-        value: "2400"
+        value: "2000"
       - key: LLM_PLANNER_RETRY_INPUT_TOKENS
         value: "1900"
+      - key: LLM_PLANNER_TOKEN_ESTIMATE_MULTIPLIER
+        value: "2.5"
+      - key: LLM_PLANNER_MIN_REQUEST_TOKENS
+        value: "6500"
       - key: LLM_CONTEXT_TOKEN_BUDGET
         value: "1600"
       - key: LLM_MAX_CONTEXT_MESSAGES
         value: "12"
+      - key: LLM_PLANNER_TOKENS_PER_MINUTE
+        value: "30000"
       - key: WHATSAPP_GROUP_SCOPE
         value: all
       - key: WHATSAPP_GROUP_ID
