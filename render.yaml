@@ -15,6 +15,10 @@ services:
         sync: false
       - key: GROQ_API_KEY
         sync: false
+      - key: GROQ_PLANNER_API_KEY
+        sync: false
+      - key: GROQ_RESPONSE_API_KEY
+        sync: false
       - key: GROQ_PLANNER_MODEL
         value: groq/compound
       - key: GROQ_RESPONSE_MODEL

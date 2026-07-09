@@ -1252,7 +1252,7 @@ function createSchedulingGraph({ messageStore }) {
             return stateFromPlan({ state, context, rawPlan: commandPlan });
         }
 
-        if (!plannerModel) plannerModel = createLlmModel(settings.llm.plannerModel);
+        if (!plannerModel) plannerModel = createLlmModel(settings.llm.plannerModel, 'planner');
         try {
             const payload = plannerPayload({ input: state.input, context });
             const estimated = estimateTokens(CHARON_SYSTEM_PROMPT) + estimateTokens(payload);
@@ -1366,7 +1366,7 @@ function createSchedulingGraph({ messageStore }) {
             return { reply, nextStep: 'end' };
         }
 
-        if (!responseModel) responseModel = createLlmModel(settings.llm.responseModel);
+        if (!responseModel) responseModel = createLlmModel(settings.llm.responseModel, 'response');
 
         const payload = responsePayload(state);
         const estimated = estimateTokens(CHARON_RESPONSE_PROMPT) + estimateTokens(payload);

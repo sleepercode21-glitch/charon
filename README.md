@@ -110,6 +110,7 @@ Fill at least:
 ```text
 MONGODB_URI=
 GROQ_API_KEY=
+GROQ_RESPONSE_API_KEY=
 WHATSAPP_REPLY_MODE=tag_only
 WHATSAPP_GROUP_SCOPE=all
 ```
@@ -137,11 +138,15 @@ Use `config/.env.example` as the template. Never commit `.env` or `real.env`.
 ```text
 MONGODB_URI=...
 GROQ_API_KEY=...
+GROQ_RESPONSE_API_KEY=...
 ```
 
 `MONGODB_URI` stores WhatsApp auth, message context, schedules, reminders, OAuth tokens, and tool state.
 
-`GROQ_API_KEY` powers the planner and response writer.
+`GROQ_API_KEY` remains the backward-compatible shared key and powers the Compound planner by default.
+Set `GROQ_PLANNER_API_KEY` to override the planner credential, and set `GROQ_RESPONSE_API_KEY` to
+give the response writer its own independent Groq quota. Purpose-specific keys take precedence over
+the shared key.
 
 ### WhatsApp
 
@@ -177,6 +182,8 @@ Keep `WHATSAPP_REPLY_MODE=tag_only` if you want Charon to observe all messages b
 ```text
 GROQ_PLANNER_MODEL=groq/compound
 GROQ_RESPONSE_MODEL=qwen/qwen3-32b
+GROQ_PLANNER_API_KEY=
+GROQ_RESPONSE_API_KEY=
 LLM_MAX_OUTPUT_TOKENS=384
 LLM_MAX_CALL_INPUT_TOKENS=24000
 LLM_PLAN_MAX_OUTPUT_TOKENS=4096

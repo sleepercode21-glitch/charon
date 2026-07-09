@@ -166,7 +166,7 @@ function reconcileRejectedRequest({ reservedTokens, model }) {
     logger.info(`LLM rate guard released ${reservedTokens} reserved tokens for failed ${model} request.`);
 }
 
-function createGroqChatModel(model) {
+function createGroqChatModel(model, apiKey) {
     return {
         async invoke(messages, options = {}) {
             const maxOutputTokens = options.maxOutputTokens || settings.llm.maxOutputTokens;
@@ -193,7 +193,7 @@ function createGroqChatModel(model) {
                 const response = await fetch(GROQ_CHAT_COMPLETIONS_URL, {
                     method: 'POST',
                     headers: {
-                        Authorization: `Bearer ${settings.llm.apiKey}`,
+                        Authorization: `Bearer ${apiKey}`,
                         'Content-Type': 'application/json',
                     },
                     body: requestBody,
@@ -244,13 +244,19 @@ function createGroqChatModel(model) {
     };
 }
 
-function createLlmModel(modelOverride = null) {
-    if (!settings.llm.apiKey) {
-        throw new Error('GROQ_API_KEY is required for Groq.');
+function createLlmModel(modelOverride = null, purpose = 'response') {
+    const model = modelOverride || settings.llm.responseModel;
+    const apiKey = purpose === 'planner'
+        ? settings.llm.plannerApiKey
+        : settings.llm.responseApiKey;
+    if (!apiKey) {
+        const variable = purpose === 'planner'
+            ? 'GROQ_PLANNER_API_KEY (or GROQ_API_KEY)'
+            : 'GROQ_RESPONSE_API_KEY (or GROQ_API_KEY)';
+        throw new Error(`${variable} is required for the Groq ${purpose} model.`);
     }
 
-    const model = modelOverride || settings.llm.responseModel;
-    const instance = createGroqChatModel(model);
+    const instance = createGroqChatModel(model, apiKey);
 
     return {
         async invoke(messages, options) {
