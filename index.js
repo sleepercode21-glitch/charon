@@ -113,14 +113,14 @@ function shouldHandleMessage(message) {
 }
 
 function messageText(message) {
-    return [
+    return [...new Set([
         message.body,
         message.pollName,
         message.caption,
         message._data?.body,
         message._data?.pollName,
         message._data?.caption,
-    ].filter(Boolean).join(' ');
+    ].filter(Boolean).map((value) => String(value).trim()))].join(' ');
 }
 
 function optionName(option) {

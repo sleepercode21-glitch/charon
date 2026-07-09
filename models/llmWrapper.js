@@ -220,6 +220,8 @@ function createGroqChatModel(model, apiKey) {
                     model,
                 });
                 const error = new Error(`[${response.status} ${response.statusText}] ${body}`);
+                error.status = response.status;
+                error.code = parsed?.error?.code || '';
                 if (delayMs > 0) error.retryAfterMs = delayMs;
                 throw error;
             }

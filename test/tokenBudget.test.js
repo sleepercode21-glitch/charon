@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { compactContext } = require('../utils/tokenBudget');
+const { plannerPayload } = require('../agents/workflows/schedulingGraph');
 
 function fixtureContext() {
     return {
@@ -121,4 +122,46 @@ test('compact context sheds detail to remain within a practical token budget', (
 
     assert.ok(compacted.estimatedTokens <= 1200);
     assert.ok(JSON.parse(compacted.json).msgs.length < 30);
+});
+
+test('planner payload trims room context against the total request budget', () => {
+    const context = fixtureContext();
+    context.messages = Array.from({ length: 80 }, (_, index) => ({
+        messageId: `message-${index}`,
+        timestamp: new Date(Date.UTC(2026, 6, 8, 18, index)).toISOString(),
+        senderName: `Member ${index % 4}`,
+        body: `Message ${index} ${'large room discussion '.repeat(50)}`,
+        type: 'chat',
+        isFromMe: false,
+    }));
+    const input = {
+        timezone: 'America/Phoenix',
+        chat: {
+            id: { _serialized: 'test-group' },
+            name: 'Test',
+        },
+        message: {
+            id: { _serialized: 'current-message' },
+            body: 'remind me in 10 minutes',
+            _data: { body: 'remind me in 10 minutes' },
+        },
+        storedMessage: { senderName: 'Mina' },
+    };
+
+    const normal = plannerPayload({
+        input,
+        context,
+        inputTokenBudget: 5000,
+    });
+    const lean = plannerPayload({
+        input,
+        context,
+        inputTokenBudget: 4300,
+        lean: true,
+    });
+
+    assert.ok(normal.estimatedTokens <= 5000);
+    assert.ok(lean.estimatedTokens <= 4300);
+    assert.ok(lean.estimatedTokens < normal.estimatedTokens);
+    assert.equal(JSON.parse(normal.payload).msg, 'remind me in 10 minutes');
 });

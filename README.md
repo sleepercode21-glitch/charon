@@ -186,6 +186,8 @@ GROQ_PLANNER_API_KEY=
 GROQ_RESPONSE_API_KEY=
 LLM_MAX_OUTPUT_TOKENS=384
 LLM_MAX_CALL_INPUT_TOKENS=24000
+LLM_PLANNER_MAX_INPUT_TOKENS=5000
+LLM_PLANNER_RETRY_INPUT_TOKENS=4300
 LLM_PLAN_MAX_OUTPUT_TOKENS=4096
 LLM_RESPONSE_MAX_OUTPUT_TOKENS=1024
 LLM_MAX_SEQUENCE_ACTIONS=0
@@ -206,6 +208,12 @@ LLM_MIN_REQUEST_INTERVAL_MS=1750
 Natural-language mode uses at most two LLM calls. `groq/compound` receives the tagged message, quote, bot clock, pending clarification, recent messages, polls, and active database summaries, then returns one action or an ordered finite sequence. `LLM_MAX_SEQUENCE_ACTIONS=0` removes the application-level step cap; setting it above zero restores a deployment-specific limit. The actual sequence must still fit in the planner model's finite JSON output.
 
 Charon preflights the whole sequence, executes steps in order, and can pass nested results such as an earlier Meet link, public id, or listed item into later steps. After local tools run, `qwen/qwen3-32b` normally writes one truthful response. Sequences longer than `LLM_SEQUENCE_RESPONSE_MAX_STEPS` use the deterministic response writer, avoiding another oversized model call. Command mode uses no LLM calls.
+
+`LLM_PLANNER_MAX_INPUT_TOKENS` caps the complete Compound request estimate, including the system
+prompt—not just conversation history. If Compound returns HTTP 413, Charon automatically retries once
+using `LLM_PLANNER_RETRY_INPUT_TOKENS` and a leaner context containing fewer messages, polls, and active
+item details. The current request, clock, pending clarification, exact active counts, and reference
+signals are retained.
 
 ### Google Meet
 

@@ -37,6 +37,10 @@ services:
         value: "5000"
       - key: LLM_MAX_CALL_INPUT_TOKENS
         value: "24000"
+      - key: LLM_PLANNER_MAX_INPUT_TOKENS
+        value: "5000"
+      - key: LLM_PLANNER_RETRY_INPUT_TOKENS
+        value: "4300"
       - key: LLM_CONTEXT_TOKEN_BUDGET
         value: "1600"
       - key: LLM_MAX_CONTEXT_MESSAGES

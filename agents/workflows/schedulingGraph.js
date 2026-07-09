@@ -76,14 +76,14 @@ function chatId(chat) {
 }
 
 function messageText(message) {
-    return [
+    return [...new Set([
         message?.body,
         message?.pollName,
         message?.caption,
         message?._data?.body,
         message?._data?.pollName,
         message?._data?.caption,
-    ].filter(Boolean).join(' ').trim();
+    ].filter(Boolean).map((value) => String(value).trim()))].join(' ').trim();
 }
 
 function currentDateContext(timezone) {
@@ -610,22 +610,42 @@ function pendingClarification(context, message) {
     };
 }
 
-function compactForPlanner(context, message) {
+function compactForPlanner(context, message, { maxTokens, lean = false } = {}) {
     return compactContext(withoutCurrentMessage(context, message), {
-        maxTokens: settings.llm.contextTokenBudget,
-        maxMessages: settings.llm.maxContextMessages,
-        minMessages: 6,
-        maxTextChars: 220,
-        maxPolls: settings.llm.maxContextPolls,
-        maxMeetings: 20,
-        maxReminders: 20,
+        maxTokens: Math.max(250, Math.min(maxTokens || settings.llm.contextTokenBudget, settings.llm.contextTokenBudget)),
+        maxMessages: lean ? Math.min(settings.llm.maxContextMessages, 8) : settings.llm.maxContextMessages,
+        minMessages: lean ? 2 : 4,
+        maxTextChars: lean ? 120 : 180,
+        maxPolls: lean ? 0 : settings.llm.maxContextPolls,
+        maxMeetings: lean ? 0 : 12,
+        maxReminders: lean ? 0 : 12,
+        leanSignals: lean,
         includeBotMessages: true,
     });
 }
 
-function plannerPayload({ input, context }) {
-    const compact = compactForPlanner(context, input.message);
-    return JSON.stringify({
+function compactQuotedContext(quoted, lean = false) {
+    if (!quoted) return null;
+    return {
+        id: quoted.id || '',
+        type: quoted.type || '',
+        body: trimText(quoted.body || '', lean ? 180 : 420),
+        pollName: trimText(quoted.pollName || '', 140),
+        pollOptions: (quoted.pollOptions || []).slice(0, lean ? 6 : 12).map((option) => ({
+            name: trimText(option?.name || option, 100),
+            votes: Number(option?.votes || 0),
+        })),
+        timestamp: quoted.timestamp || '',
+    };
+}
+
+function plannerPayload({
+    input,
+    context,
+    inputTokenBudget = settings.llm.plannerMaxInputTokens,
+    lean = false,
+}) {
+    const base = {
         clock: currentDateContext(input.timezone),
         defaultTz: input.timezone || settings.timezone,
         room: {
@@ -637,10 +657,25 @@ function plannerPayload({ input, context }) {
             || input.message?.from
             || 'unknown',
         msg: messageText(input.message),
-        quoted: input.quoted || null,
+        quoted: compactQuotedContext(input.quoted, lean),
         pending: pendingClarification(context, input.message),
+    };
+    const fixedTokens = estimateTokens(CHARON_SYSTEM_PROMPT) + estimateTokens(base);
+    const contextBudget = Math.max(250, inputTokenBudget - fixedTokens - 80);
+    const compact = compactForPlanner(context, input.message, {
+        maxTokens: contextBudget,
+        lean,
+    });
+    const payload = JSON.stringify({
+        ...base,
         roomContext: JSON.parse(compact.json),
     });
+    return {
+        payload,
+        estimatedTokens: estimateTokens(CHARON_SYSTEM_PROMPT) + estimateTokens(payload),
+        contextTokens: compact.estimatedTokens,
+        inputTokenBudget,
+    };
 }
 
 function hasTimeRequest(plan) {
@@ -1254,19 +1289,42 @@ function createSchedulingGraph({ messageStore }) {
 
         if (!plannerModel) plannerModel = createLlmModel(settings.llm.plannerModel, 'planner');
         try {
-            const payload = plannerPayload({ input: state.input, context });
-            const estimated = estimateTokens(CHARON_SYSTEM_PROMPT) + estimateTokens(payload);
-            const response = await plannerModel.invoke([
-                new SystemMessage(CHARON_SYSTEM_PROMPT),
-                new HumanMessage(payload),
-            ], { json: true, maxOutputTokens: settings.llm.planMaxOutputTokens });
+            const budgets = [...new Set([
+                settings.llm.plannerMaxInputTokens,
+                settings.llm.plannerRetryInputTokens,
+            ].filter((value) => Number.isFinite(value) && value > 0))];
+            let lastError = null;
 
-            logModelUsage('Compound decision', response, estimated);
-            logJson('Compound raw', response.content);
-            const parsed = safeJson(response.content);
-            if (!parsed) throw new Error('invalid_plan_json');
-            const finalPlan = parsed.plan || parsed.final || parsed;
-            return stateFromPlan({ state, context, rawPlan: finalPlan });
+            for (const [attempt, inputTokenBudget] of budgets.entries()) {
+                const built = plannerPayload({
+                    input: state.input,
+                    context,
+                    inputTokenBudget,
+                    lean: attempt > 0,
+                });
+                logger.info(`Planner payload attempt=${attempt + 1} estimated=${built.estimatedTokens} context=${built.contextTokens} budget=${inputTokenBudget}.`);
+
+                try {
+                    const response = await plannerModel.invoke([
+                        new SystemMessage(CHARON_SYSTEM_PROMPT),
+                        new HumanMessage(built.payload),
+                    ], { json: true, maxOutputTokens: settings.llm.planMaxOutputTokens });
+
+                    logModelUsage('Compound decision', response, built.estimatedTokens);
+                    logJson('Compound raw', response.content);
+                    const parsed = safeJson(response.content);
+                    if (!parsed) throw new Error('invalid_plan_json');
+                    const finalPlan = parsed.plan || parsed.final || parsed;
+                    return stateFromPlan({ state, context, rawPlan: finalPlan });
+                } catch (error) {
+                    lastError = error;
+                    const canRetrySmaller = error?.status === 413 && attempt < budgets.length - 1;
+                    if (!canRetrySmaller) throw error;
+                    logger.warn(`Compound rejected planner payload at estimated=${built.estimatedTokens}; retrying with lean context.`);
+                }
+            }
+
+            throw lastError || new Error('planner_failed');
         } catch (error) {
             logger.warn('Compound decision failed; command mode remains available.', error);
             return stateFromPlan({
@@ -1420,5 +1478,6 @@ module.exports = {
     invokeSchedulingGraph,
     executePlanSequence,
     normalizePlanActions,
+    plannerPayload,
     resolvePlanReferences,
 };

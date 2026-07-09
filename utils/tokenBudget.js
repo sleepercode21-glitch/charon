@@ -111,7 +111,8 @@ function latestBy(items, field) {
     return [...items].sort((left, right) => new Date(right[field] || 0) - new Date(left[field] || 0))[0] || null;
 }
 
-function compactSignals(context, sourceMessages, meetings, reminders, polls) {
+function compactSignals(context, sourceMessages, meetings, reminders, polls, options = {}) {
+    const lean = Boolean(options.lean);
     const nextMeeting = earliestBy(
         meetings.filter((meeting) => ['draft', 'scheduled'].includes(meeting.status)),
         'start',
@@ -125,6 +126,13 @@ function compactSignals(context, sourceMessages, meetings, reminders, polls) {
     const latestPoll = latestBy(polls, 'updatedAt');
     const derivedMeetingCount = meetings.filter((meeting) => ['draft', 'scheduled'].includes(meeting.status)).length;
     const derivedReminderCount = reminders.filter((reminder) => reminder.status === 'pending').length;
+    const meetingSignal = nextMeeting ? compactMeeting(nextMeeting) : null;
+    const reminderSignal = nextReminder ? compactReminder(nextReminder) : null;
+    const pollSignal = latestPoll ? compactPoll(latestPoll, {
+        maxNameChars: 90,
+        maxOptionChars: 60,
+        maxVotes: 5,
+    }) : null;
 
     return {
         activeCounts: context.activeCounts || {
@@ -132,22 +140,38 @@ function compactSignals(context, sourceMessages, meetings, reminders, polls) {
             reminders: derivedReminderCount,
             total: derivedMeetingCount + derivedReminderCount,
         },
-        nextMeeting: nextMeeting ? compactMeeting(nextMeeting) : null,
-        nextReminder: nextReminder ? compactReminder(nextReminder) : null,
+        nextMeeting: lean && meetingSignal ? {
+            id: meetingSignal.id,
+            title: meetingSignal.title,
+            start: meetingSignal.start,
+            tz: meetingSignal.tz,
+            status: meetingSignal.status,
+            link: meetingSignal.link,
+        } : meetingSignal,
+        nextReminder: lean && reminderSignal ? {
+            id: reminderSignal.id,
+            text: reminderSignal.text,
+            dueAt: reminderSignal.dueAt,
+            tz: reminderSignal.tz,
+            status: reminderSignal.status,
+        } : reminderSignal,
         latestHuman: latestHuman ? {
             t: latestHuman.timestamp,
             from: truncateText(latestHuman.senderName || latestHuman.senderId, 48),
-            msg: truncateText(latestHuman.body, 180),
+            msg: truncateText(latestHuman.body, lean ? 100 : 180),
         } : null,
         latestBot: latestBot ? {
             t: latestBot.timestamp,
-            msg: truncateText(latestBot.body, 180),
+            msg: truncateText(latestBot.body, lean ? 100 : 180),
         } : null,
-        latestPoll: latestPoll ? compactPoll(latestPoll, {
-            maxNameChars: 90,
-            maxOptionChars: 60,
-            maxVotes: 5,
-        }) : null,
+        latestPoll: lean && pollSignal ? {
+            name: pollSignal.name,
+            updatedAt: pollSignal.updatedAt,
+            leader: pollSignal.leader,
+            leaders: pollSignal.leaders,
+            tied: pollSignal.tied,
+            ballots: pollSignal.ballots,
+        } : pollSignal,
     };
 }
 
@@ -206,7 +230,14 @@ function compactContext(context, options = {}) {
         const reminders = (context.reminders || []).slice(0, reminderLimit).map(compactReminder);
 
         return {
-            signals: compactSignals(context, sourceMessages, context.meetings || [], context.reminders || [], context.polls || []),
+            signals: compactSignals(
+                context,
+                sourceMessages,
+                context.meetings || [],
+                context.reminders || [],
+                context.polls || [],
+                { lean: options.leanSignals },
+            ),
             msgs: messages,
             polls,
             meetings,
