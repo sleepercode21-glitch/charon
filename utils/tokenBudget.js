@@ -30,6 +30,13 @@ function pollLeader(poll) {
     return pollVoteCounts(poll)[0] || null;
 }
 
+function pollLeaders(poll) {
+    const counts = pollVoteCounts(poll);
+    if (!counts.length) return [];
+    const highest = counts[0].count;
+    return counts.filter((vote) => vote.count === highest);
+}
+
 function compactPoll(poll, options = {}) {
     if (!poll) return null;
 
@@ -37,6 +44,7 @@ function compactPoll(poll, options = {}) {
     const maxOptionChars = options.maxOptionChars || 80;
     const maxVotes = options.maxVotes || 8;
     const leader = pollLeader(poll);
+    const leaders = pollLeaders(poll);
     const counts = new Map(pollVoteCounts(poll).map((vote) => [vote.option, vote.count]));
 
     return {
@@ -47,10 +55,99 @@ function compactPoll(poll, options = {}) {
             n: counts.get(option.name) || 0,
         })),
         leader: leader ? { opt: truncateText(leader.option, maxOptionChars), n: leader.count } : null,
+        leaders: leaders.map((vote) => ({
+            opt: truncateText(vote.option, maxOptionChars),
+            n: vote.count,
+        })),
+        tied: leaders.length > 1,
+        ballots: (poll.votes || []).length,
         votes: pollVoteCounts(poll).slice(0, maxVotes).map((vote) => ({
             opt: truncateText(vote.option, maxOptionChars),
             n: vote.count,
         })),
+    };
+}
+
+function compactMeeting(meeting) {
+    return {
+        id: shortId(meeting._id),
+        title: truncateText(meeting.title, 80),
+        desc: truncateText(meeting.description, 80),
+        start: meeting.start,
+        end: meeting.end,
+        tz: meeting.timezone,
+        status: meeting.status,
+        link: Boolean(meeting.meetLink),
+        createdAt: meeting.createdAt,
+        updatedAt: meeting.updatedAt,
+    };
+}
+
+function compactReminder(reminder) {
+    return {
+        id: shortId(reminder._id),
+        text: truncateText(reminder.text, 80),
+        dueAt: reminder.dueAt,
+        tz: reminder.timezone,
+        by: truncateText(reminder.createdBy, 40),
+        status: reminder.status,
+        createdAt: reminder.createdAt,
+        updatedAt: reminder.updatedAt,
+    };
+}
+
+function latestMessage(messages, predicate) {
+    return messages
+        .filter(predicate)
+        .sort((left, right) => new Date(right.timestamp || 0) - new Date(left.timestamp || 0))[0]
+        || null;
+}
+
+function earliestBy(items, field) {
+    return [...items].sort((left, right) => new Date(left[field] || 0) - new Date(right[field] || 0))[0] || null;
+}
+
+function latestBy(items, field) {
+    return [...items].sort((left, right) => new Date(right[field] || 0) - new Date(left[field] || 0))[0] || null;
+}
+
+function compactSignals(context, sourceMessages, meetings, reminders, polls) {
+    const nextMeeting = earliestBy(
+        meetings.filter((meeting) => ['draft', 'scheduled'].includes(meeting.status)),
+        'start',
+    );
+    const nextReminder = earliestBy(
+        reminders.filter((reminder) => reminder.status === 'pending'),
+        'dueAt',
+    );
+    const latestHuman = latestMessage(sourceMessages, (message) => !message.isFromMe);
+    const latestBot = latestMessage(sourceMessages, (message) => message.isFromMe);
+    const latestPoll = latestBy(polls, 'updatedAt');
+    const derivedMeetingCount = meetings.filter((meeting) => ['draft', 'scheduled'].includes(meeting.status)).length;
+    const derivedReminderCount = reminders.filter((reminder) => reminder.status === 'pending').length;
+
+    return {
+        activeCounts: context.activeCounts || {
+            meetings: derivedMeetingCount,
+            reminders: derivedReminderCount,
+            total: derivedMeetingCount + derivedReminderCount,
+        },
+        nextMeeting: nextMeeting ? compactMeeting(nextMeeting) : null,
+        nextReminder: nextReminder ? compactReminder(nextReminder) : null,
+        latestHuman: latestHuman ? {
+            t: latestHuman.timestamp,
+            from: truncateText(latestHuman.senderName || latestHuman.senderId, 48),
+            msg: truncateText(latestHuman.body, 180),
+        } : null,
+        latestBot: latestBot ? {
+            t: latestBot.timestamp,
+            msg: truncateText(latestBot.body, 180),
+        } : null,
+        latestPoll: latestPoll ? compactPoll(latestPoll, {
+            maxNameChars: 90,
+            maxOptionChars: 60,
+            maxVotes: 5,
+        }) : null,
     };
 }
 
@@ -59,9 +156,9 @@ function compactContext(context, options = {}) {
     const maxMessages = options.maxMessages || 10;
     const minMessages = options.minMessages || 3;
     const maxTextChars = options.maxTextChars || 140;
-    const maxPolls = options.maxPolls ?? 3;
-    const maxMeetings = options.maxMeetings ?? 3;
-    const maxReminders = options.maxReminders ?? 3;
+    let pollLimit = Math.min(options.maxPolls ?? 3, (context.polls || []).length);
+    let meetingLimit = Math.min(options.maxMeetings ?? 3, (context.meetings || []).length);
+    let reminderLimit = Math.min(options.maxReminders ?? 3, (context.reminders || []).length);
     const includeBotMessages = options.includeBotMessages ?? true;
     const sourceMessages = includeBotMessages
         ? (context.messages || [])
@@ -102,32 +199,14 @@ function compactContext(context, options = {}) {
         });
 
         const polls = (context.polls || [])
-            .slice(0, maxPolls)
+            .slice(0, pollLimit)
             .map((poll) => compactPoll(poll));
 
-        const meetings = (context.meetings || []).slice(0, maxMeetings).map((meeting) => ({
-            id: shortId(meeting._id),
-            title: truncateText(meeting.title, 80),
-            desc: truncateText(meeting.description, 80),
-            start: meeting.start,
-            end: meeting.end,
-            tz: meeting.timezone,
-            status: meeting.status,
-            link: Boolean(meeting.meetLink),
-            updatedAt: meeting.updatedAt,
-        }));
-
-        const reminders = (context.reminders || []).slice(0, maxReminders).map((reminder) => ({
-            id: shortId(reminder._id),
-            text: truncateText(reminder.text, 80),
-            dueAt: reminder.dueAt,
-            tz: reminder.timezone,
-            by: truncateText(reminder.createdBy, 40),
-            status: reminder.status,
-            updatedAt: reminder.updatedAt,
-        }));
+        const meetings = (context.meetings || []).slice(0, meetingLimit).map(compactMeeting);
+        const reminders = (context.reminders || []).slice(0, reminderLimit).map(compactReminder);
 
         return {
+            signals: compactSignals(context, sourceMessages, context.meetings || [], context.reminders || [], context.polls || []),
             msgs: messages,
             polls,
             meetings,
@@ -148,6 +227,17 @@ function compactContext(context, options = {}) {
 
         if (textLimit > 80) {
             textLimit = Math.max(80, Math.floor(textLimit * 0.65));
+            continue;
+        }
+
+        if (meetingLimit > 3 || reminderLimit > 3) {
+            meetingLimit = Math.max(3, Math.floor(meetingLimit * 0.7));
+            reminderLimit = Math.max(3, Math.floor(reminderLimit * 0.7));
+            continue;
+        }
+
+        if (pollLimit > 1) {
+            pollLimit -= 1;
             continue;
         }
 

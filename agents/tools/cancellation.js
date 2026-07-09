@@ -100,6 +100,17 @@ function idMatches(item, query) {
     return Boolean(needle && id && (id === needle || id.startsWith(needle) || id.endsWith(needle)));
 }
 
+function cancelledItemSummary(active) {
+    const item = active.item || {};
+    return {
+        id: String(item._id || '').slice(-6),
+        type: active.type,
+        label: active.type === 'meeting'
+            ? item.title || 'Meeting'
+            : item.text || 'Reminder',
+    };
+}
+
 async function cancelMeetings({ chatId, query, limit, messageStore }) {
     return messageStore.findActiveItems({
         chatId,
@@ -190,6 +201,7 @@ async function cancelActiveItem({ decision, chat, messageStore }) {
         type: 'cancellation',
         meetings: result.meetings,
         reminders: result.reminders,
+        items: items.map(cancelledItemSummary),
     };
 }
 

@@ -4,11 +4,7 @@ const { logger } = require('../utils/logger');
 const GROQ_CHAT_COMPLETIONS_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const RATE_WINDOW_MS = 60 * 1000;
 
-let availableTokens = settings.llm.rateStartFull ? Math.max(settings.llm.tokensPerMinute || 0, 0) : 0;
-let availableRequests = settings.llm.rateStartFull ? Math.max(settings.llm.requestsPerMinute || 0, 0) : 0;
-let lastRateRefillAt = Date.now();
-let lastLlmRequestAt = 0;
-let limiterQueue = Promise.resolve();
+const rateStates = new Map();
 
 function estimateTokens(value) {
     const text = typeof value === 'string' ? value : JSON.stringify(value || '');
@@ -42,26 +38,53 @@ function langchainContent(message) {
     return String(content || '');
 }
 
-function refillRateBuckets() {
-    const now = Date.now();
-    const elapsed = Math.max(0, now - lastRateRefillAt);
-    lastRateRefillAt = now;
+function rateLimitsFor(model) {
+    const planner = model === settings.llm.plannerModel;
+    return {
+        tokenLimit: Math.max(planner
+            ? settings.llm.plannerTokensPerMinute
+            : settings.llm.tokensPerMinute || 0, 0),
+        requestLimit: Math.max(planner
+            ? settings.llm.plannerRequestsPerMinute
+            : settings.llm.requestsPerMinute || 0, 0),
+    };
+}
 
-    const tokenLimit = Math.max(settings.llm.tokensPerMinute || 0, 0);
-    const requestLimit = Math.max(settings.llm.requestsPerMinute || 0, 0);
+function rateStateFor(model) {
+    if (!rateStates.has(model)) {
+        const limits = rateLimitsFor(model);
+        rateStates.set(model, {
+            availableTokens: settings.llm.rateStartFull ? limits.tokenLimit : 0,
+            availableRequests: settings.llm.rateStartFull ? limits.requestLimit : 0,
+            lastRateRefillAt: Date.now(),
+            lastLlmRequestAt: 0,
+            queue: Promise.resolve(),
+        });
+    }
+    return rateStates.get(model);
+}
+
+function refillRateBuckets(model) {
+    const state = rateStateFor(model);
+    const { tokenLimit, requestLimit } = rateLimitsFor(model);
+    const now = Date.now();
+    const elapsed = Math.max(0, now - state.lastRateRefillAt);
+    state.lastRateRefillAt = now;
 
     if (tokenLimit > 0) {
-        availableTokens = Math.min(tokenLimit, availableTokens + (elapsed * tokenLimit / RATE_WINDOW_MS));
+        state.availableTokens = Math.min(tokenLimit, state.availableTokens + (elapsed * tokenLimit / RATE_WINDOW_MS));
     }
 
     if (requestLimit > 0) {
-        availableRequests = Math.min(requestLimit, availableRequests + (elapsed * requestLimit / RATE_WINDOW_MS));
+        state.availableRequests = Math.min(requestLimit, state.availableRequests + (elapsed * requestLimit / RATE_WINDOW_MS));
     }
+
+    return state;
 }
 
 async function reserveLlmCapacity({ estimatedTokens, model }) {
-    const tokenLimit = Math.max(settings.llm.tokensPerMinute || 0, 0);
-    const requestLimit = Math.max(settings.llm.requestsPerMinute || 0, 0);
+    const { tokenLimit, requestLimit } = rateLimitsFor(model);
+    const state = rateStateFor(model);
     const minIntervalMs = Math.max(settings.llm.minRequestIntervalMs || 0, 0);
     if (tokenLimit <= 0 && requestLimit <= 0 && minIntervalMs <= 0) {
         return { reservedTokens: 0 };
@@ -74,26 +97,26 @@ async function reserveLlmCapacity({ estimatedTokens, model }) {
         const requestCost = requestLimit > 0 ? 1 : 0;
 
         while (true) {
-            refillRateBuckets();
-            const tokenReady = tokenLimit <= 0 || availableTokens >= tokenCost;
-            const requestReady = requestLimit <= 0 || availableRequests >= requestCost;
+            refillRateBuckets(model);
+            const tokenReady = tokenLimit <= 0 || state.availableTokens >= tokenCost;
+            const requestReady = requestLimit <= 0 || state.availableRequests >= requestCost;
             const intervalWait = minIntervalMs > 0
-                ? Math.max(0, lastLlmRequestAt + minIntervalMs - Date.now())
+                ? Math.max(0, state.lastLlmRequestAt + minIntervalMs - Date.now())
                 : 0;
             const intervalReady = intervalWait <= 0;
 
             if (tokenReady && requestReady && intervalReady) {
-                if (tokenLimit > 0) availableTokens -= tokenCost;
-                if (requestLimit > 0) availableRequests -= requestCost;
-                lastLlmRequestAt = Date.now();
+                if (tokenLimit > 0) state.availableTokens -= tokenCost;
+                if (requestLimit > 0) state.availableRequests -= requestCost;
+                state.lastLlmRequestAt = Date.now();
                 return { reservedTokens: tokenCost };
             }
 
             const tokenWait = tokenLimit > 0 && !tokenReady
-                ? ((tokenCost - availableTokens) / tokenLimit) * RATE_WINDOW_MS
+                ? ((tokenCost - state.availableTokens) / tokenLimit) * RATE_WINDOW_MS
                 : 0;
             const requestWait = requestLimit > 0 && !requestReady
-                ? ((requestCost - availableRequests) / requestLimit) * RATE_WINDOW_MS
+                ? ((requestCost - state.availableRequests) / requestLimit) * RATE_WINDOW_MS
                 : 0;
             const waitMs = Math.ceil(Math.max(tokenWait, requestWait, intervalWait, 250));
 
@@ -102,17 +125,18 @@ async function reserveLlmCapacity({ estimatedTokens, model }) {
         }
     };
 
-    const queued = limiterQueue.then(reserve, reserve);
-    limiterQueue = queued.catch(() => {});
+    const queued = state.queue.then(reserve, reserve);
+    state.queue = queued.catch(() => {});
     return queued;
 }
 
 function reconcileActualUsage({ actualTokens, reservedTokens, model }) {
-    const tokenLimit = Math.max(settings.llm.tokensPerMinute || 0, 0);
+    const { tokenLimit } = rateLimitsFor(model);
     if (tokenLimit <= 0 || !Number.isFinite(actualTokens) || actualTokens <= reservedTokens) return;
 
     const extra = actualTokens - reservedTokens;
-    availableTokens = Math.max(0, availableTokens - extra);
+    const state = refillRateBuckets(model);
+    state.availableTokens = Math.max(0, state.availableTokens - extra);
     logger.info(`LLM rate guard reconciled ${extra} extra tokens for ${model}; actual=${actualTokens}, reserved=${reservedTokens}.`);
 }
 
@@ -135,10 +159,10 @@ function retryDelayFromGroq({ response, parsed }) {
 }
 
 function reconcileRejectedRequest({ reservedTokens, model }) {
-    const tokenLimit = Math.max(settings.llm.tokensPerMinute || 0, 0);
+    const { tokenLimit } = rateLimitsFor(model);
     if (tokenLimit <= 0 || !reservedTokens) return;
-    refillRateBuckets();
-    availableTokens = Math.min(tokenLimit, availableTokens + reservedTokens);
+    const state = refillRateBuckets(model);
+    state.availableTokens = Math.min(tokenLimit, state.availableTokens + reservedTokens);
     logger.info(`LLM rate guard released ${reservedTokens} reserved tokens for failed ${model} request.`);
 }
 
@@ -146,7 +170,12 @@ function createGroqChatModel(model) {
     return {
         async invoke(messages, options = {}) {
             const maxOutputTokens = options.maxOutputTokens || settings.llm.maxOutputTokens;
-            const estimatedRequestTokens = estimateMessagesTokens(messages) + maxOutputTokens;
+            const estimatedInputTokens = estimateMessagesTokens(messages);
+            const maxCallInputTokens = Math.max(settings.llm.maxCallInputTokens || 0, 0);
+            if (maxCallInputTokens > 0 && estimatedInputTokens > maxCallInputTokens) {
+                throw new Error(`llm_call_input_too_large estimated=${estimatedInputTokens} limit=${maxCallInputTokens}`);
+            }
+            const estimatedRequestTokens = estimatedInputTokens + maxOutputTokens;
             const reservation = await reserveLlmCapacity({ estimatedTokens: estimatedRequestTokens, model });
             const requestBody = JSON.stringify({
                 model,
@@ -215,12 +244,12 @@ function createGroqChatModel(model) {
     };
 }
 
-function createLlmModel() {
+function createLlmModel(modelOverride = null) {
     if (!settings.llm.apiKey) {
         throw new Error('GROQ_API_KEY is required for Groq.');
     }
 
-    const model = settings.llm.model;
+    const model = modelOverride || settings.llm.responseModel;
     const instance = createGroqChatModel(model);
 
     return {

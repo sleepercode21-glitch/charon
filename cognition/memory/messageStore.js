@@ -56,6 +56,21 @@ function idMatches(item, target) {
     return Boolean(needle && id && (id === needle || id.startsWith(needle) || id.endsWith(needle)));
 }
 
+function mergeUniqueDocuments(primary, secondary, limit) {
+    const seen = new Set();
+    const merged = [];
+
+    for (const item of [...primary, ...secondary]) {
+        const id = String(item?._id || '');
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        merged.push(item);
+        if (merged.length >= limit) break;
+    }
+
+    return merged;
+}
+
 function createMessageStore({ mongoose }) {
     const WhatsAppMessage = mongoose.models.WhatsAppMessage || mongoose.model('WhatsAppMessage', new mongoose.Schema({
         messageId: { type: String, unique: true, index: true },
@@ -228,7 +243,7 @@ function createMessageStore({ mongoose }) {
     }
 
     async function recentPolls(chatId, limit = 5) {
-        return Poll.find({ chatId }).sort({ createdAt: -1, updatedAt: -1 }).limit(limit).lean();
+        return Poll.find({ chatId }).sort({ updatedAt: -1, createdAt: -1 }).limit(limit).lean();
     }
 
     async function findPollByMessageId({ chatId, pollMessageId }) {
@@ -237,18 +252,46 @@ function createMessageStore({ mongoose }) {
     }
 
     async function recentContext(chatId, limit = 80) {
-        const [messages, polls, meetings, reminders] = await Promise.all([
+        const now = new Date();
+        const activeMeetingFilter = {
+            chatId,
+            status: { $in: ['draft', 'scheduled'] },
+            start: { $gte: new Date(now.getTime() - 2 * 60 * 60 * 1000) },
+        };
+        const activeReminderFilter = {
+            chatId,
+            status: 'pending',
+        };
+        const [
+            messages,
+            polls,
+            activeMeetings,
+            recentMeetings,
+            activeReminders,
+            recentReminders,
+            activeMeetingCount,
+            activeReminderCount,
+        ] = await Promise.all([
             WhatsAppMessage.find({ chatId }).sort({ timestamp: -1 }).limit(limit).lean(),
-            Poll.find({ chatId }).sort({ createdAt: -1, updatedAt: -1 }).limit(10).lean(),
-            Meeting.find({ chatId }).sort({ createdAt: -1 }).limit(12).lean(),
-            StandaloneReminder.find({ chatId }).sort({ createdAt: -1 }).limit(12).lean(),
+            Poll.find({ chatId }).sort({ updatedAt: -1, createdAt: -1 }).limit(10).lean(),
+            Meeting.find(activeMeetingFilter).sort({ start: 1, updatedAt: -1 }).limit(20).lean(),
+            Meeting.find({ chatId }).sort({ updatedAt: -1, createdAt: -1 }).limit(8).lean(),
+            StandaloneReminder.find(activeReminderFilter).sort({ dueAt: 1, updatedAt: -1 }).limit(20).lean(),
+            StandaloneReminder.find({ chatId }).sort({ updatedAt: -1, createdAt: -1 }).limit(8).lean(),
+            Meeting.countDocuments(activeMeetingFilter),
+            StandaloneReminder.countDocuments(activeReminderFilter),
         ]);
 
         return {
             messages: messages.reverse(),
             polls,
-            meetings,
-            reminders,
+            meetings: mergeUniqueDocuments(activeMeetings, recentMeetings, 24),
+            reminders: mergeUniqueDocuments(activeReminders, recentReminders, 24),
+            activeCounts: {
+                meetings: activeMeetingCount,
+                reminders: activeReminderCount,
+                total: activeMeetingCount + activeReminderCount,
+            },
         };
     }
 
@@ -461,14 +504,24 @@ function createMessageStore({ mongoose }) {
                 { _id: reminder._id },
                 { $set: { status: 'completed' } },
             );
-            return { completed: true, type: 'reminder', label: `reminder "${reminder.text}"` };
+            return {
+                completed: true,
+                id: String(reminder._id || '').slice(-6),
+                type: 'reminder',
+                label: `reminder "${reminder.text}"`,
+            };
         }
 
         await Meeting.updateOne(
             { _id: meeting._id },
             { $set: { status: 'completed' } },
         );
-        return { completed: true, type: 'meeting', label: `meeting "${meeting.title}"` };
+        return {
+            completed: true,
+            id: String(meeting._id || '').slice(-6),
+            type: 'meeting',
+            label: `meeting "${meeting.title}"`,
+        };
     }
 
     async function findActiveItem({ chatId, target }) {

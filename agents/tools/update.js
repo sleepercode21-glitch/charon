@@ -63,6 +63,7 @@ async function updateActiveItem({ decision, timeResolution, chat, messageStore }
             if (result.updated) {
                 return {
                     status: 'updated',
+                    id: String(result.item?._id || '').slice(-6),
                     type: 'meeting',
                     label: result.label,
                     when: formatForChat(start, timezone),
@@ -132,6 +133,7 @@ async function updateActiveItem({ decision, timeResolution, chat, messageStore }
 
         return {
             status: 'updated',
+            id: String(result.item?._id || '').slice(-6),
             type: 'reminder',
             label: result.label,
             when: dueAt ? formatForChat(dueAt, timezone) : '',
@@ -193,6 +195,7 @@ async function updateActiveItem({ decision, timeResolution, chat, messageStore }
 
     return {
         status: 'updated',
+        id: String(result.item?._id || '').slice(-6),
         type: 'meeting',
         label: result.label,
         when: start ? formatForChat(start, timezone) : '',

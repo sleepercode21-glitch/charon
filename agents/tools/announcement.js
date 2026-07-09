@@ -6,6 +6,7 @@ async function announceToGroup({ client, chat, text }) {
     return {
         status: 'announced',
         type: 'announcement',
+        text: message,
     };
 }
 

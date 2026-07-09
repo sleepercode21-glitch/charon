@@ -16,6 +16,7 @@ async function markDone({ decision, chat, messageStore }) {
 
     return {
         status: 'completed',
+        id: result.id || '',
         type: result.type,
         label: result.label,
     };

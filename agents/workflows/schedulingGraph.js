@@ -4,7 +4,6 @@ const { settings } = require('../../config/settings');
 const { createLlmModel } = require('../../models/llmWrapper');
 const { CHARON_SYSTEM_PROMPT } = require('../../models/prompts/charonSystemPrompt');
 const { CHARON_RESPONSE_PROMPT } = require('../../models/prompts/responsePrompt');
-const { CHARON_SITUATION_PROMPT } = require('../../models/prompts/situationPrompt');
 const { extractJson } = require('../../utils/json');
 const { logger } = require('../../utils/logger');
 const { compactContext, estimateTokens } = require('../../utils/tokenBudget');
@@ -19,63 +18,6 @@ const { updateActiveItem } = require('../tools/update');
 
 const ACTION_INTENTS = new Set(['schedule', 'reminder', 'update', 'cancel', 'complete', 'list', 'announce']);
 const KNOWN_INTENTS = new Set([...ACTION_INTENTS, 'answer', 'refuse']);
-const DB_TOOL_NAMES = new Set(['list_active_items', 'get_active_item']);
-const MAX_DB_TOOL_STEPS = Math.max(0, Math.floor(settings.llm.maxDbToolSteps || 1));
-const TOOLBELT = [
-    {
-        intent: 'schedule',
-        does: 'Create or reuse a Google Meet session, store it, and let reminder worker notify before it starts.',
-        needs: ['title/topic', 'date', 'time', 'timezone'],
-        outputs: ['schedule id', 'when', 'Meet link'],
-    },
-    {
-        intent: 'reminder',
-        does: 'Create a standalone text reminder for the group.',
-        needs: ['reminder text', 'date', 'time', 'timezone'],
-        outputs: ['reminder id', 'when'],
-    },
-    {
-        intent: 'update',
-        does: 'Change an active meeting or reminder.',
-        needs: ['target id/title/reference', 'new title/text/date/time/timezone'],
-        outputs: ['updated item'],
-    },
-    {
-        intent: 'cancel',
-        does: 'Cancel active meetings and/or reminders.',
-        needs: ['target id/title/reference or kind all'],
-        outputs: ['cancelled counts'],
-    },
-    {
-        intent: 'complete',
-        does: 'Mark an active meeting or reminder done.',
-        needs: ['target id/title/reference'],
-        outputs: ['completed item'],
-    },
-    {
-        intent: 'list',
-        does: 'List active meetings/reminders, counts, ids, times, and links.',
-        needs: ['kind or target when known'],
-        outputs: ['active item summaries'],
-    },
-    {
-        intent: 'announce',
-        does: 'Tag everyone in the group with a message.',
-        needs: ['announcement text'],
-        outputs: ['announcement sent'],
-    },
-    {
-        intent: 'answer',
-        does: 'Chat, explain, joke, summarize, brainstorm, answer technical questions, or describe Charon.',
-        needs: ['useful reply substance'],
-        outputs: ['reply'],
-    },
-];
-
-function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 const COMMAND_TIME_FORMAT = 'YYYY-MM-DD HH:MM Area/City';
 const COMMAND_SCHEDULE_USAGE = `new schedule: Title, ${COMMAND_TIME_FORMAT}`;
 const COMMAND_REMINDER_USAGE = `new reminder: Text, ${COMMAND_TIME_FORMAT}`;
@@ -121,7 +63,6 @@ const COMMAND_HELP = [
 const CharonState = Annotation.Root({
     input: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
     context: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
-    situation: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
     plan: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
     decision: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
     timeResolution: Annotation({ reducer: (_left, right) => right, default: () => ({}) }),
@@ -147,6 +88,19 @@ function messageText(message) {
 
 function currentDateContext(timezone) {
     const now = new Date();
+    const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+    }).formatToParts(now).reduce((values, part) => {
+        if (part.type !== 'literal') values[part.type] = part.value;
+        return values;
+    }, {});
     const local = new Intl.DateTimeFormat('en-CA', {
         timeZone: timezone,
         weekday: 'short',
@@ -162,9 +116,10 @@ function currentDateContext(timezone) {
     return {
         backendTimezone: timezone,
         backendLocal: local,
+        backendLocalIso: `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`,
         utc: now.toISOString(),
         timestampMs: now.getTime(),
-        relativeTimeRule: `Resolve phrases like "in 2 minutes", "in 30 mins", "tomorrow", and "next Tuesday" from backendLocal in ${timezone}.`,
+        relativeTimeRule: `Resolve "in N minutes/hours" by adding N to timestampMs, then return the resulting UTC instant with trailing Z.`,
     };
 }
 
@@ -587,11 +542,6 @@ function normalizedIntent(value) {
     return KNOWN_INTENTS.has(intent) ? intent : 'answer';
 }
 
-function normalizedSituationIntent(value) {
-    const intent = String(value || '').toLowerCase();
-    return KNOWN_INTENTS.has(intent) ? intent : '';
-}
-
 function normalizedKind(value, text = '') {
     const raw = String(value || '').toLowerCase();
     const body = String(text || '').toLowerCase();
@@ -611,15 +561,6 @@ function normalizedKind(value, text = '') {
         return null;
     }
     return null;
-}
-
-function cleanHint(value, max = 220) {
-    return trimText(value, max);
-}
-
-function normalizedToolKind(value) {
-    const kind = normalizedKind(value, value);
-    return kind || '';
 }
 
 function shortId(value) {
@@ -662,31 +603,10 @@ function pendingClarification(context, message) {
     return {
         kind: inferPendingKind(combined),
         asked: trimText(ask.body, 150),
+        askedAt: ask.timestamp || ask.createdAt || '',
         about: trimText(priorUser?.body || '', 180),
-    };
-}
-
-function dbItemSummary(active) {
-    const item = active.item || {};
-    if (active.type === 'meeting') {
-        return {
-            id: shortId(item._id),
-            kind: 'meeting',
-            title: item.title || 'Meeting',
-            when: item.start ? new Date(item.start).toISOString() : '',
-            timezone: item.timezone || settings.timezone,
-            meetLink: item.meetLink || '',
-            status: item.status || '',
-        };
-    }
-
-    return {
-        id: shortId(item._id),
-        kind: 'reminder',
-        text: item.text || 'Reminder',
-        when: item.dueAt ? new Date(item.dueAt).toISOString() : '',
-        timezone: item.timezone || settings.timezone,
-        status: item.status || '',
+        aboutAt: priorUser?.timestamp || priorUser?.createdAt || '',
+        requester: trimText(priorUser?.senderName || priorUser?.senderId || '', 48),
     };
 }
 
@@ -694,229 +614,33 @@ function compactForPlanner(context, message) {
     return compactContext(withoutCurrentMessage(context, message), {
         maxTokens: settings.llm.contextTokenBudget,
         maxMessages: settings.llm.maxContextMessages,
-        minMessages: 4,
-        maxTextChars: 180,
+        minMessages: 6,
+        maxTextChars: 220,
         maxPolls: settings.llm.maxContextPolls,
-        maxMeetings: 8,
-        maxReminders: 8,
+        maxMeetings: 20,
+        maxReminders: 20,
         includeBotMessages: true,
     });
 }
 
-function compactForSituation(context, message) {
-    return compactContext(withoutCurrentMessage(context, message), {
-        maxTokens: settings.llm.situationContextTokenBudget || 900,
-        maxMessages: Math.min(settings.llm.maxContextMessages, 10),
-        minMessages: 3,
-        maxTextChars: 130,
-        maxPolls: Math.min(settings.llm.maxContextPolls, 4),
-        maxMeetings: 4,
-        maxReminders: 4,
-        includeBotMessages: true,
-    });
-}
-
-function plannerPayload({ input, context, situation = null }) {
-    const message = input.message;
-    const compact = compactForPlanner(context, message);
-    const body = messageText(message);
-
+function plannerPayload({ input, context }) {
+    const compact = compactForPlanner(context, input.message);
     return JSON.stringify({
         clock: currentDateContext(input.timezone),
-        defaultTz: input.timezone,
+        defaultTz: input.timezone || settings.timezone,
         room: {
             chatId: chatId(input.chat),
             chatName: input.chat?.name || '',
-            replyMode: settings.whatsapp.replyMode,
-            groupScope: settings.whatsapp.groupScope,
         },
-        message: {
-            id: message?.id?._serialized || message?.id || '',
-            type: message?.type || '',
-            timestamp: message?.timestamp ? new Date(message.timestamp * 1000).toISOString() : '',
-            author: message?.author || message?.from || '',
-            fromMe: Boolean(message?.fromMe),
-        },
+        requester: input.storedMessage?.senderName
+            || input.message?.author
+            || input.message?.from
+            || 'unknown',
+        msg: messageText(input.message),
         quoted: input.quoted || null,
-        requester: input.storedMessage?.senderName || message.author || message.from || 'unknown',
-        msg: body,
-        pending: pendingClarification(context, message),
-        situation,
-        toolbelt: TOOLBELT,
-        ctx: JSON.parse(compact.json),
-        budget: {
-            ctxTokens: compact.estimatedTokens,
-            omittedOlderMessages: compact.omitted?.olderMessages || 0,
-        },
+        pending: pendingClarification(context, input.message),
+        roomContext: JSON.parse(compact.json),
     });
-}
-
-function situationPayload({ input, context }) {
-    const message = input.message;
-    const compact = compactForSituation(context, message);
-    const body = messageText(message);
-
-    return JSON.stringify({
-        clock: currentDateContext(input.timezone),
-        defaultTz: input.timezone,
-        room: {
-            chatId: chatId(input.chat),
-            chatName: input.chat?.name || '',
-            replyMode: settings.whatsapp.replyMode,
-            groupScope: settings.whatsapp.groupScope,
-        },
-        message: {
-            id: message?.id?._serialized || message?.id || '',
-            type: message?.type || '',
-            timestamp: message?.timestamp ? new Date(message.timestamp * 1000).toISOString() : '',
-            author: message?.author || message?.from || '',
-            fromMe: Boolean(message?.fromMe),
-        },
-        quoted: input.quoted || null,
-        requester: input.storedMessage?.senderName || message.author || message.from || 'unknown',
-        msg: body,
-        pending: pendingClarification(context, message),
-        capabilities: [
-            'chat naturally when addressed',
-            'create/list/update/cancel meetings',
-            'create/list/update/cancel reminders',
-            'read recent messages and polls',
-            'ask only when essential details are missing',
-        ],
-        ctx: JSON.parse(compact.json),
-        budget: {
-            ctxTokens: compact.estimatedTokens,
-            omittedOlderMessages: compact.omitted?.olderMessages || 0,
-        },
-        objective: 'Read the current room state and classify what Charon should do next. Do not call tools.',
-    });
-}
-
-function plannerLoopPayload({ input, context, dbResults, situation }) {
-    const base = JSON.parse(plannerPayload({ input, context, situation }));
-    return JSON.stringify({
-        ...base,
-        db: dbResults,
-        tools: [
-            {
-                name: 'list_active_items',
-                args: {
-                    kind: 'meeting|reminder|all|',
-                    target: 'optional id/title/search text',
-                    limit: '1-5',
-                },
-            },
-            {
-                name: 'get_active_item',
-                args: {
-                    kind: 'meeting|reminder|all|',
-                    target: 'required id/title/search text',
-                },
-            },
-        ],
-    });
-}
-
-async function runPlannerDbTool({ toolCall, chatId: id, messageStore }) {
-    const tool = String(toolCall?.tool || '');
-    const args = toolCall?.args || {};
-    if (!DB_TOOL_NAMES.has(tool)) {
-        return {
-            tool,
-            ok: false,
-            error: 'unknown_db_tool',
-        };
-    }
-
-    const kind = normalizedToolKind(args.kind);
-    const target = String(args.target || '').trim();
-    const requestedLimit = Number(args.limit);
-    const limit = tool === 'get_active_item'
-        ? 1
-        : Number.isInteger(requestedLimit) && requestedLimit > 0
-            ? Math.min(requestedLimit, 5)
-            : 5;
-
-    if (tool === 'get_active_item' && !target) {
-        return {
-            tool,
-            ok: false,
-            error: 'target_required',
-        };
-    }
-
-    const items = await messageStore.findActiveItems({
-        chatId: id,
-        kind,
-        target: target || null,
-        limit,
-    });
-
-    return {
-        tool,
-        ok: true,
-        args: {
-            kind: kind || 'all',
-            target,
-            limit,
-        },
-        count: items.length,
-        items: items.slice(0, limit).map(dbItemSummary),
-    };
-}
-
-function dbToolKey(toolCall) {
-    const tool = String(toolCall?.tool || '');
-    const args = toolCall?.args || {};
-    return JSON.stringify({
-        tool,
-        kind: normalizedToolKind(args.kind) || 'all',
-        target: String(args.target || '').trim().toLowerCase(),
-        limit: tool === 'get_active_item' ? 1 : Math.min(Number(args.limit) || 5, 5),
-    });
-}
-
-function planFromRepeatedDbTool(dbResults) {
-    const result = [...dbResults].reverse().find((item) => item?.ok && item.items?.[0]);
-    const item = result?.items?.[0];
-    if (!item) {
-        return {
-            intent: 'answer',
-            reply: 'I already checked that database path, sir. Send me the schedule or reminder id and I will act on it.',
-        };
-    }
-
-    return {
-        intent: 'list',
-        kind: item.kind || result.args?.kind || 'all',
-        target: item.id || result.args?.target || '',
-        reply: '',
-    };
-}
-
-function normalizeSituation(raw, body) {
-    const situation = raw && typeof raw === 'object' ? raw : {};
-    const intent = normalizedSituationIntent(situation.primaryIntent) || 'answer';
-    const confidence = Math.max(0, Math.min(1, Number(situation.confidence || 0)));
-
-    return {
-        primaryIntent: intent,
-        confidence,
-        currentAsk: cleanHint(situation.currentAsk || body, 240),
-        focus: cleanHint(situation.focus || 'current_message', 60),
-        useQuoted: Boolean(situation.useQuoted),
-        needsDb: Boolean(situation.needsDb),
-        titleHint: cleanHint(situation.titleHint || '', 140),
-        textHint: cleanHint(situation.textHint || '', 260),
-        targetHint: cleanHint(situation.targetHint || '', 160),
-        dateHint: cleanHint(situation.dateHint || '', 80),
-        timeHint: cleanHint(situation.timeHint || '', 80),
-        timezoneHint: cleanHint(situation.timezoneHint || '', 80),
-        kindHint: cleanHint(situation.kindHint || '', 40),
-        missing: cleanHint(situation.missing || '', 140),
-        ignore: cleanHint(situation.ignore || '', 180),
-        why: cleanHint(situation.why || '', 220),
-    };
 }
 
 function hasTimeRequest(plan) {
@@ -925,13 +649,19 @@ function hasTimeRequest(plan) {
 
 function whenText(plan) {
     if (!plan.date && !plan.time) return '';
+    const date = String(plan.date || '').trim();
+    if (date.includes('T') && Number.isFinite(Date.parse(date))) {
+        const timePart = date.split('T')[1] || '';
+        const hasZone = timePart.includes('Z') || timePart.includes('+') || timePart.slice(1).includes('-');
+        return hasZone ? date : `${date}Z`;
+    }
     return [plan.date, plan.time, plan.timezone].filter(Boolean).join(' ').trim();
 }
 
-function timeResolutionForPlan(plan, body) {
+function timeResolutionForPlan(plan, body, { allowBodyFallback = true } = {}) {
     const intent = normalizedIntent(plan.intent);
     let when = whenText(plan);
-    if (!when && ACTION_INTENTS.has(intent)) {
+    if (!when && ACTION_INTENTS.has(intent) && allowBodyFallback) {
         when = String(body || '');
     }
     const timezone = normalizeTimezone(plan.timezone, extractTimezone(`${when} ${body}`, settings.timezone));
@@ -1093,14 +823,210 @@ function planToDecision(plan, body) {
     return decision;
 }
 
+function normalizedPlan(rawPlan, inheritedSource = 'llm') {
+    return {
+        intent: normalizedIntent(rawPlan?.intent),
+        title: String(rawPlan?.title || ''),
+        text: String(rawPlan?.text || ''),
+        target: String(rawPlan?.target || ''),
+        date: String(rawPlan?.date || ''),
+        time: String(rawPlan?.time || ''),
+        timezone: String(rawPlan?.timezone || ''),
+        kind: String(rawPlan?.kind || ''),
+        attendees: Array.isArray(rawPlan?.attendees) ? rawPlan.attendees : [],
+        reply: String(rawPlan?.reply || ''),
+        ask: String(rawPlan?.ask || ''),
+        source: String(rawPlan?.source || inheritedSource),
+    };
+}
+
+function normalizePlanActions(rawPlan, maxActions = settings.llm.maxSequenceActions) {
+    const inheritedSource = String(rawPlan?.source || 'llm');
+    const candidates = Array.isArray(rawPlan?.actions) && rawPlan.actions.length
+        ? rawPlan.actions
+        : [rawPlan];
+
+    const validActions = candidates.filter((action) => action && typeof action === 'object');
+    const limit = Number.isInteger(maxActions) && maxActions > 0
+        ? maxActions
+        : validActions.length;
+
+    return validActions
+        .slice(0, limit)
+        .map((action) => normalizedPlan(action, inheritedSource));
+}
+
+function resultReference(steps, expression) {
+    const parts = String(expression || '').split('.');
+    let value = null;
+    let path = [];
+
+    if (parts[0] === 'previous') {
+        value = steps[steps.length - 1]?.result;
+        path = parts.slice(1);
+    } else if (parts[0] === 'steps' && /^\d+$/.test(parts[1] || '')) {
+        value = steps[Number(parts[1]) - 1]?.result;
+        path = parts.slice(2);
+    }
+
+    for (const key of path) {
+        if (value === undefined || value === null) break;
+        value = value[key];
+    }
+
+    if (value === undefined || value === null) return '';
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+}
+
+function resolvePlanReferences(plan, steps) {
+    const resolve = (value) => {
+        if (typeof value === 'string') {
+            return value.replace(/\{\{\s*((?:previous|steps\.\d+)(?:\.[A-Za-z0-9_]+)+)\s*\}\}/g, (_match, expression) => (
+                resultReference(steps, expression)
+            ));
+        }
+        if (Array.isArray(value)) return value.map(resolve);
+        if (value && typeof value === 'object') {
+            return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, resolve(item)]));
+        }
+        return value;
+    };
+
+    return resolve(plan);
+}
+
+function sequencePreflightFailure(plan, time) {
+    const intent = normalizedIntent(plan.intent);
+    const hasRequestedTimeChange = Boolean(plan.date || plan.time || plan.timezone);
+    let need = '';
+    let clarification = String(plan.ask || '');
+
+    if (intent === 'schedule' && time.status !== 'resolved') {
+        need = 'meeting_time';
+        clarification ||= 'What date, time, and timezone should I use for the meeting?';
+    } else if (intent === 'reminder' && time.status !== 'resolved') {
+        need = 'reminder_time';
+        clarification ||= 'When should I remind the group?';
+    } else if (intent === 'update' && hasRequestedTimeChange && time.status !== 'resolved') {
+        need = 'new_time';
+        clarification ||= 'What exact new date, time, and timezone should I use?';
+    } else if (plan.ask) {
+        need = 'clarification';
+    }
+
+    if (!need) return null;
+    return {
+        status: 'failed',
+        type: intent,
+        need,
+        clarification,
+        reason: 'sequence_preflight_failed',
+    };
+}
+
+async function executePlanSequence({ actions, body, runAction }) {
+    const steps = [];
+    let failedAt = null;
+
+    for (const [index, plan] of actions.entries()) {
+        const time = timeResolutionForPlan(plan, body, { allowBodyFallback: false });
+        const failure = sequencePreflightFailure(plan, time);
+        if (!failure) continue;
+
+        return {
+            actionResult: {
+                status: 'sequence_partial',
+                type: 'sequence',
+                total: actions.length,
+                executed: 0,
+                stoppedAt: index + 1,
+                steps: [{
+                    index: index + 1,
+                    intent: normalizedIntent(plan.intent),
+                    plan,
+                    time,
+                    result: failure,
+                    executed: false,
+                }],
+            },
+            timeResolution: {
+                status: 'sequence',
+                steps: [time],
+            },
+        };
+    }
+
+    for (const [index, rawAction] of actions.entries()) {
+        const plan = resolvePlanReferences(rawAction, steps);
+        const decision = planToDecision(plan, body);
+        const time = timeResolutionForPlan(plan, body, { allowBodyFallback: false });
+        let result;
+
+        try {
+            result = await runAction(decision, time, plan);
+        } catch (error) {
+            logger.error(`Sequence step ${index + 1} failed`, error);
+            result = {
+                status: 'failed',
+                type: decision.intent,
+                reason: 'step_execution_failed',
+            };
+        }
+
+        steps.push({
+            index: index + 1,
+            intent: decision.intent,
+            plan,
+            time,
+            result,
+            executed: true,
+        });
+        if (result?.status === 'failed') {
+            failedAt = index + 1;
+            break;
+        }
+    }
+
+    return {
+        actionResult: {
+            status: failedAt ? 'sequence_partial' : 'sequence_completed',
+            type: 'sequence',
+            total: actions.length,
+            executed: steps.length,
+            stoppedAt: failedAt,
+            steps,
+        },
+        timeResolution: {
+            status: 'sequence',
+            steps: steps.map((step) => step.time),
+        },
+    };
+}
+
 function routeAfterPlan(state) {
-    return ACTION_INTENTS.has(state.decision.intent) ? 'tools' : 'respond';
+    return state.decision.intent === 'sequence' || ACTION_INTENTS.has(state.decision.intent)
+        ? 'tools'
+        : 'respond';
 }
 
 function responsePayload(state) {
+    const compact = compactContext(withoutCurrentMessage(state.context || {}, state.input.message), {
+        maxTokens: settings.llm.responseContextTokenBudget,
+        maxMessages: Math.min(settings.llm.maxContextMessages, 12),
+        minMessages: 3,
+        maxTextChars: 160,
+        maxPolls: 2,
+        maxMeetings: 3,
+        maxReminders: 3,
+        includeBotMessages: true,
+    });
+
     return JSON.stringify({
+        clock: currentDateContext(state.input.timezone),
         msg: messageText(state.input.message),
-        situation: state.situation,
+        quoted: state.input.quoted || null,
+        conversation: JSON.parse(compact.json),
         intent: state.decision.intent,
         plan: state.plan,
         result: state.actionResult,
@@ -1161,6 +1087,24 @@ function safeReplyForState(state, reply) {
 function deterministicBotReply(state) {
     const result = state.actionResult || {};
     const plan = state.plan || {};
+
+    if (result.type === 'sequence') {
+        const replies = (result.steps || []).map((step, index) => {
+            const reply = deterministicBotReply({
+                ...state,
+                plan: step.plan || {},
+                decision: { intent: step.intent },
+                timeResolution: step.time || {},
+                actionResult: step.result || {},
+            });
+            return index === 0 ? reply : reply.replace(/\b,?\s*sir\b/gi, '').replace(/\s+([,.;!?])/g, '$1');
+        });
+
+        if (result.status === 'sequence_partial') {
+            replies.push(`Stopped at step ${result.stoppedAt || replies.length} because it could not finish.`);
+        }
+        return replies.filter(Boolean).join('\n');
+    }
 
     if (state.decision.intent === 'refuse') {
         return 'I handle scheduling and reminders, sir.';
@@ -1237,31 +1181,54 @@ function commandModePlan(reason = 'LLM mode is unavailable.') {
 }
 
 function shouldUseDeterministicReply(state) {
-    return ACTION_INTENTS.has(state.decision?.intent)
-        || String(state.plan?.source || '').startsWith('command');
+    const sequenceSteps = state.actionResult?.type === 'sequence'
+        ? state.actionResult.steps?.length || 0
+        : 0;
+    const deterministicSequenceThreshold = settings.llm.sequenceResponseMaxSteps;
+    return String(state.plan?.source || '').startsWith('command')
+        || (deterministicSequenceThreshold > 0 && sequenceSteps > deterministicSequenceThreshold);
 }
 
 function createSchedulingGraph({ messageStore }) {
-    let model = null;
+    let responseModel = null;
+    let plannerModel = null;
 
     function stateFromPlan({ state, context, rawPlan }) {
         const body = messageText(state.input.message);
-        const plan = {
-            intent: normalizedIntent(rawPlan.intent),
-            title: String(rawPlan.title || ''),
-            text: String(rawPlan.text || ''),
-            target: String(rawPlan.target || ''),
-            date: String(rawPlan.date || ''),
-            time: String(rawPlan.time || ''),
-            timezone: String(rawPlan.timezone || ''),
-            kind: String(rawPlan.kind || ''),
-            attendees: Array.isArray(rawPlan.attendees) ? rawPlan.attendees : [],
-            reply: String(rawPlan.reply || ''),
-            ask: String(rawPlan.ask || ''),
-            source: String(rawPlan.source || 'llm'),
-        };
-        const decision = planToDecision(plan, body);
-        const timeResolution = timeResolutionForPlan(plan, body);
+        const requestedActionCount = Array.isArray(rawPlan?.actions) ? rawPlan.actions.length : 1;
+        const hasConfiguredLimit = settings.llm.maxSequenceActions > 0;
+        const planInput = hasConfiguredLimit && requestedActionCount > settings.llm.maxSequenceActions
+            ? {
+                intent: 'answer',
+                reply: `That request needs ${requestedActionCount} actions. I can safely run up to ${settings.llm.maxSequenceActions} at once, so split it into smaller batches.`,
+                source: 'sequence_limit',
+            }
+            : rawPlan;
+        const actions = normalizePlanActions(planInput);
+        const isSequence = actions.length > 1
+            || (Array.isArray(planInput?.actions) && planInput.actions.length > 0);
+        const plan = isSequence
+            ? {
+                intent: 'sequence',
+                actions,
+                source: String(planInput?.source || actions[0]?.source || 'llm'),
+            }
+            : actions[0] || normalizedPlan(commandModePlan('No valid action was planned.'));
+        const decision = isSequence
+            ? {
+                intent: 'sequence',
+                actions: actions.map((action) => planToDecision(action, body)),
+                shouldReply: true,
+            }
+            : planToDecision(plan, body);
+        const timeResolution = isSequence
+            ? {
+                status: 'sequence',
+                steps: actions.map((action) => timeResolutionForPlan(action, body, {
+                    allowBodyFallback: false,
+                })),
+            }
+            : timeResolutionForPlan(plan, body);
 
         logJson('Plan parsed', { plan, decision, timeResolution });
 
@@ -1274,163 +1241,34 @@ function createSchedulingGraph({ messageStore }) {
         };
     }
 
-    async function situationNode(state) {
+    async function planNode(state) {
         const body = messageText(state.input.message);
         const context = Object.keys(state.context || {}).length > 0
             ? state.context
             : await messageStore.recentContext(chatId(state.input.chat));
-
         const commandPlan = parseCommandPlan(body);
         if (commandPlan) {
-            const situation = normalizeSituation({
-                primaryIntent: commandPlan.intent,
-                confidence: 1,
-                currentAsk: body,
-                focus: 'current_message',
-                useQuoted: false,
-                needsDb: false,
-                titleHint: commandPlan.title || '',
-                textHint: commandPlan.text || commandPlan.reply || '',
-                targetHint: commandPlan.target || '',
-                dateHint: commandPlan.date || '',
-                timeHint: commandPlan.time || '',
-                timezoneHint: commandPlan.timezone || '',
-                kindHint: commandPlan.kind || '',
-                why: 'Slash command parsed deterministically.',
-            }, body);
-            logJson('Situation parsed', situation);
-            return { context, situation, nextStep: 'planner' };
-        }
-
-        if (!model) model = createLlmModel();
-
-        const payload = situationPayload({ input: state.input, context });
-        const estimated = estimateTokens(CHARON_SITUATION_PROMPT) + estimateTokens(payload);
-        try {
-            const response = await model.invoke([
-                new SystemMessage(CHARON_SITUATION_PROMPT),
-                new HumanMessage(payload),
-            ], { json: true, maxOutputTokens: settings.llm.situationMaxOutputTokens });
-
-            logModelUsage('Situation', response, estimated);
-            logJson('Situation raw', response.content);
-
-            const parsed = safeJson(response.content);
-            if (!parsed) throw new Error('invalid_situation_json');
-            const situation = normalizeSituation(parsed, body);
-            logJson('Situation parsed', situation);
-            return { context, situation, nextStep: 'planner' };
-        } catch (error) {
-            logger.warn('Situation reader failed; switching to command mode.', error);
-            const situation = {
-                ...normalizeSituation({
-                    primaryIntent: 'answer',
-                    confidence: 1,
-                    currentAsk: body,
-                    textHint: COMMAND_HELP,
-                    why: 'LLM situation reader failed.',
-                }, body),
-                llmFailed: true,
-            };
-            return { context, situation, nextStep: 'planner' };
-        }
-    }
-
-    async function planNode(state) {
-        const body = messageText(state.input.message);
-        const commandPlan = parseCommandPlan(body);
-        if (commandPlan) {
-            const context = Object.keys(state.context || {}).length > 0
-                ? state.context
-                : await messageStore.recentContext(chatId(state.input.chat));
             logJson('Command plan', commandPlan);
             return stateFromPlan({ state, context, rawPlan: commandPlan });
         }
 
-        const context = Object.keys(state.context || {}).length > 0
-            ? state.context
-            : await messageStore.recentContext(chatId(state.input.chat));
-
-        if (state.situation?.llmFailed) {
-            return stateFromPlan({
-                state,
-                context,
-                rawPlan: commandModePlan('LLM mode is unavailable, sir. Use command mode:'),
-            });
-        }
-
-        if (!model) model = createLlmModel();
-
-        const id = chatId(state.input.chat);
-        const dbResults = [];
-        const seenDbToolCalls = new Set();
+        if (!plannerModel) plannerModel = createLlmModel(settings.llm.plannerModel);
         try {
-            const decisionGapMs = Math.max(settings.llm.decisionGapMs || 0, 0);
-            if (decisionGapMs > 0) {
-                logger.info(`Spacing LLM decision calls by ${Math.ceil(decisionGapMs / 1000)}s before planner.`);
-                await sleep(decisionGapMs);
-            }
+            const payload = plannerPayload({ input: state.input, context });
+            const estimated = estimateTokens(CHARON_SYSTEM_PROMPT) + estimateTokens(payload);
+            const response = await plannerModel.invoke([
+                new SystemMessage(CHARON_SYSTEM_PROMPT),
+                new HumanMessage(payload),
+            ], { json: true, maxOutputTokens: settings.llm.planMaxOutputTokens });
 
-            for (let step = 0; step <= MAX_DB_TOOL_STEPS; step += 1) {
-                const payload = plannerLoopPayload({
-                    input: state.input,
-                    context,
-                    dbResults,
-                    situation: state.situation,
-                });
-                const estimated = estimateTokens(CHARON_SYSTEM_PROMPT) + estimateTokens(payload);
-                const response = await model.invoke([
-                    new SystemMessage(CHARON_SYSTEM_PROMPT),
-                    new HumanMessage(payload),
-                ], { json: true, maxOutputTokens: settings.llm.planMaxOutputTokens });
-
-                logModelUsage(`Plan step ${step + 1}`, response, estimated);
-                logJson(`Plan raw ${step + 1}`, response.content);
-
-                const parsed = safeJson(response.content);
-                if (!parsed) throw new Error('invalid_plan_json');
-
-                if (parsed.tool) {
-                    const key = dbToolKey(parsed);
-                    if (seenDbToolCalls.has(key)) {
-                        logger.warn(`Planner repeated DB tool call; ending loop with existing DB result. key=${key}`);
-                        return stateFromPlan({
-                            state,
-                            context,
-                            rawPlan: planFromRepeatedDbTool(dbResults),
-                        });
-                    }
-                    seenDbToolCalls.add(key);
-
-                    if (step >= MAX_DB_TOOL_STEPS) {
-                        return stateFromPlan({
-                            state,
-                            context,
-                            rawPlan: commandModePlan('LLM mode could not choose a safe DB action, sir. Use command mode:'),
-                        });
-                    }
-
-                    const toolResult = await runPlannerDbTool({
-                        toolCall: parsed,
-                        chatId: id,
-                        messageStore,
-                    });
-                    dbResults.push(toolResult);
-                    logJson('Planner DB tool result', toolResult);
-                    continue;
-                }
-
-                const finalPlan = parsed.plan || parsed.final || parsed;
-                return stateFromPlan({ state, context, rawPlan: finalPlan });
-            }
-
-            return stateFromPlan({
-                state,
-                context,
-                rawPlan: commandModePlan('LLM mode could not settle on a safe action, sir. Use command mode:'),
-            });
+            logModelUsage('Compound decision', response, estimated);
+            logJson('Compound raw', response.content);
+            const parsed = safeJson(response.content);
+            if (!parsed) throw new Error('invalid_plan_json');
+            const finalPlan = parsed.plan || parsed.final || parsed;
+            return stateFromPlan({ state, context, rawPlan: finalPlan });
         } catch (error) {
-            logger.warn('Planner LLM failed; command mode remains available.', error);
+            logger.warn('Compound decision failed; command mode remains available.', error);
             return stateFromPlan({
                 state,
                 context,
@@ -1441,62 +1279,84 @@ function createSchedulingGraph({ messageStore }) {
 
     async function toolsNode(state) {
         const input = state.input;
-        const decision = state.decision;
-        let actionResult = {};
+        const body = messageText(input.message);
 
-        if (decision.intent === 'schedule') {
-            actionResult = await scheduleMeeting({
-                decision,
-                timeResolution: state.timeResolution,
-                context: state.context,
-                chat: input.chat,
-                triggerMessage: input.message,
-                messageStore,
-            });
-        } else if (decision.intent === 'reminder') {
-            actionResult = await createStandaloneReminder({
-                decision,
-                timeResolution: state.timeResolution,
-                chat: input.chat,
-                triggerMessage: input.message,
-                messageStore,
-            });
-        } else if (decision.intent === 'update') {
-            actionResult = await updateActiveItem({
-                decision,
-                timeResolution: state.timeResolution,
-                chat: input.chat,
-                messageStore,
-            });
-        } else if (decision.intent === 'cancel') {
-            actionResult = await cancelActiveItem({
-                decision,
-                chat: input.chat,
-                messageStore,
-            });
-        } else if (decision.intent === 'complete') {
-            actionResult = await markDone({
-                decision,
-                chat: input.chat,
-                messageStore,
-            });
-        } else if (decision.intent === 'list') {
-            actionResult = await listActiveItems({
-                chat: input.chat,
-                kind: decision.list?.kind,
-                target: decision.list?.target,
-                messageStore,
-            });
-        } else if (decision.intent === 'announce') {
-            actionResult = await announceToGroup({
-                client: input.client,
-                chat: input.chat,
-                text: decision.announcement?.text,
-            });
+        async function runAction(decision, timeResolution) {
+            let actionResult = {};
+            if (decision.intent === 'schedule') {
+                actionResult = await scheduleMeeting({
+                    decision,
+                    timeResolution,
+                    context: state.context,
+                    chat: input.chat,
+                    triggerMessage: input.message,
+                    messageStore,
+                });
+            } else if (decision.intent === 'reminder') {
+                actionResult = await createStandaloneReminder({
+                    decision,
+                    timeResolution,
+                    chat: input.chat,
+                    triggerMessage: input.message,
+                    messageStore,
+                });
+            } else if (decision.intent === 'update') {
+                actionResult = await updateActiveItem({
+                    decision,
+                    timeResolution,
+                    chat: input.chat,
+                    messageStore,
+                });
+            } else if (decision.intent === 'cancel') {
+                actionResult = await cancelActiveItem({
+                    decision,
+                    chat: input.chat,
+                    messageStore,
+                });
+            } else if (decision.intent === 'complete') {
+                actionResult = await markDone({
+                    decision,
+                    chat: input.chat,
+                    messageStore,
+                });
+            } else if (decision.intent === 'list') {
+                actionResult = await listActiveItems({
+                    chat: input.chat,
+                    kind: decision.list?.kind,
+                    target: decision.list?.target,
+                    messageStore,
+                });
+            } else if (decision.intent === 'announce') {
+                actionResult = await announceToGroup({
+                    client: input.client,
+                    chat: input.chat,
+                    text: decision.announcement?.text,
+                });
+            } else if (decision.intent === 'answer' || decision.intent === 'refuse') {
+                actionResult = {
+                    status: decision.intent === 'answer' ? 'answered' : 'refused',
+                    type: decision.intent,
+                    reply: decision.response || '',
+                };
+            }
+
+            return actionResult;
         }
 
-        logJson('Action result', actionResult);
-        return { actionResult, nextStep: 'respond' };
+        if (state.decision.intent !== 'sequence') {
+            const actionResult = await runAction(state.decision, state.timeResolution);
+            logJson('Action result', actionResult);
+            return { actionResult, nextStep: 'respond' };
+        }
+
+        const { actionResult, timeResolution } = await executePlanSequence({
+            actions: state.plan.actions,
+            body,
+            runAction,
+        });
+
+        logJson('Sequence result', actionResult);
+        return { actionResult, timeResolution, nextStep: 'respond' };
     }
 
     async function respondNode(state) {
@@ -1506,12 +1366,12 @@ function createSchedulingGraph({ messageStore }) {
             return { reply, nextStep: 'end' };
         }
 
-        if (!model) model = createLlmModel();
+        if (!responseModel) responseModel = createLlmModel(settings.llm.responseModel);
 
         const payload = responsePayload(state);
         const estimated = estimateTokens(CHARON_RESPONSE_PROMPT) + estimateTokens(payload);
         try {
-            const response = await model.invoke([
+            const response = await responseModel.invoke([
                 new SystemMessage(CHARON_RESPONSE_PROMPT),
                 new HumanMessage(payload),
             ], { json: true, maxOutputTokens: settings.llm.responseMaxOutputTokens });
@@ -1526,19 +1386,17 @@ function createSchedulingGraph({ messageStore }) {
             logJson('Final reply', safeReply);
             return { reply: safeReply, nextStep: 'end' };
         } catch (error) {
-            logger.warn('Response writer failed; switching to command mode.', error);
-            const reply = safeReplyForState(state, commandModePlan('LLM response mode is unavailable, sir. Use command mode:').reply);
+            logger.warn('Response writer failed; using the deterministic result reply.', error);
+            const reply = safeReplyForState(state, deterministicBotReply(state));
             return { reply, nextStep: 'end' };
         }
     }
 
     return new StateGraph(CharonState)
-        .addNode('situation_reader', situationNode)
         .addNode('planner', planNode)
         .addNode('tool_runner', toolsNode)
         .addNode('responder', respondNode)
-        .addEdge(START, 'situation_reader')
-        .addEdge('situation_reader', 'planner')
+        .addEdge(START, 'planner')
         .addConditionalEdges('planner', routeAfterPlan, {
             tools: 'tool_runner',
             respond: 'responder',
@@ -1557,4 +1415,10 @@ async function invokeSchedulingGraph(graph, input) {
     }
 }
 
-module.exports = { createSchedulingGraph, invokeSchedulingGraph };
+module.exports = {
+    createSchedulingGraph,
+    invokeSchedulingGraph,
+    executePlanSequence,
+    normalizePlanActions,
+    resolvePlanReferences,
+};

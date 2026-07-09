@@ -46,20 +46,16 @@ The LangGraph workflow lives in `agents/workflows/schedulingGraph.js`.
 The workflow has three main jobs:
 
 - Planner: decides whether the tagged message is chat, scheduling, reminder, update, cancel, list, completion, or announcement.
-- DB lookup loop: before acting on "last", "it", "them", active items, ids, counts, or Meet links, the planner can call safe database tools for exact state.
+- Context builder: loads recent conversation and polls, prioritizes active meetings/reminders by event time, and adds exact counts plus "next" and "latest" reference signals.
 - Tools: perform side effects such as creating Meet links, writing schedules, cancelling items, and listing active state.
 - Response writer: turns the tool result into a short, human WhatsApp reply.
 
 Slash commands bypass the LLM entirely. This keeps the bot useful when the Groq free tier is rate-limited.
 
-The LLM never gets raw MongoDB access. It can only request safe, scoped tools:
-
-```text
-list_active_items({ kind, target, limit })
-get_active_item({ kind, target })
-```
-
-Those tools only read active schedules/reminders for the current WhatsApp group. Create, update, cancel, complete, list, and announce actions still run through deterministic application tools after the planner has selected an exact action.
+The LLM never gets raw MongoDB access. It receives a compact, group-scoped snapshot containing
+recent messages, poll leaders and ties, active item summaries, exact active counts, and the nearest
+meeting/reminder. Create, update, cancel, complete, list, and announce actions still run through
+deterministic application tools after the planner selects an exact action.
 
 ## Project Structure
 
@@ -179,25 +175,30 @@ Keep `WHATSAPP_REPLY_MODE=tag_only` if you want Charon to observe all messages b
 ### LLM
 
 ```text
-GROQ_MODEL=llama-3.1-8b-instant
+GROQ_PLANNER_MODEL=groq/compound
+GROQ_RESPONSE_MODEL=qwen/qwen3-32b
 LLM_MAX_OUTPUT_TOKENS=384
-LLM_SITUATION_MAX_OUTPUT_TOKENS=160
-LLM_PLAN_MAX_OUTPUT_TOKENS=220
-LLM_RESPONSE_MAX_OUTPUT_TOKENS=220
-LLM_MAX_INPUT_TOKENS=4500
-LLM_CONTEXT_TOKEN_BUDGET=1800
-LLM_SITUATION_CONTEXT_TOKEN_BUDGET=550
-LLM_MAX_CONTEXT_MESSAGES=16
-LLM_MAX_CONTEXT_POLLS=5
+LLM_MAX_CALL_INPUT_TOKENS=24000
+LLM_PLAN_MAX_OUTPUT_TOKENS=4096
+LLM_RESPONSE_MAX_OUTPUT_TOKENS=1024
+LLM_MAX_SEQUENCE_ACTIONS=0
+LLM_SEQUENCE_RESPONSE_MAX_STEPS=12
+LLM_MAX_INPUT_TOKENS=10000
+LLM_CONTEXT_TOKEN_BUDGET=6000
+LLM_RESPONSE_CONTEXT_TOKEN_BUDGET=1200
+LLM_MAX_CONTEXT_MESSAGES=30
+LLM_MAX_CONTEXT_POLLS=8
 LLM_TOKENS_PER_MINUTE=5200
 LLM_REQUESTS_PER_MINUTE=25
+LLM_PLANNER_TOKENS_PER_MINUTE=60000
+LLM_PLANNER_REQUESTS_PER_MINUTE=25
 LLM_RATE_SAFETY_MULTIPLIER=1.35
 LLM_MIN_REQUEST_INTERVAL_MS=1750
-LLM_DECISION_GAP_MS=18000
-LLM_MAX_DB_TOOL_STEPS=1
 ```
 
-The planner is intentionally compact. Charon first makes a small triage call, waits briefly, then makes the actual planning call. That spacing keeps Groq's free-tier token window from getting burned by stacked requests.
+Natural-language mode uses at most two LLM calls. `groq/compound` receives the tagged message, quote, bot clock, pending clarification, recent messages, polls, and active database summaries, then returns one action or an ordered finite sequence. `LLM_MAX_SEQUENCE_ACTIONS=0` removes the application-level step cap; setting it above zero restores a deployment-specific limit. The actual sequence must still fit in the planner model's finite JSON output.
+
+Charon preflights the whole sequence, executes steps in order, and can pass nested results such as an earlier Meet link, public id, or listed item into later steps. After local tools run, `qwen/qwen3-32b` normally writes one truthful response. Sequences longer than `LLM_SEQUENCE_RESPONSE_MAX_STEPS` use the deterministic response writer, avoiding another oversized model call. Command mode uses no LLM calls.
 
 ### Google Meet
 
@@ -372,6 +373,18 @@ Tag Charon in the group:
 @Charon tag everyone
 @Charon tell me a quick joke
 ```
+
+Multi-action requests can combine or repeat any available operation:
+
+```text
+@Charon cancel the old architecture session, schedule the replacement Friday at 6pm Arizona time, then announce its Meet link
+@Charon create reminders for the draft review tomorrow at 9am, the final review Friday at 2pm, and submission Friday at 5pm Arizona time
+@Charon list the next meeting, announce its Meet link, then mark the reminder with id a1b2c3 done
+```
+
+Sequences are finite and run in order. Charon validates required dates, times, timezones, and
+clarifications before step one, stops later steps when a step fails, and reports only actions whose
+tool results prove they ran.
 
 Charon should ignore untagged messages but keep them as context. This lets it use earlier poll results or scheduling discussion when someone finally tags it.
 
