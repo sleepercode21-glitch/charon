@@ -151,17 +151,17 @@ test('planner payload trims room context against the total request budget', () =
     const normal = plannerPayload({
         input,
         context,
-        inputTokenBudget: 5000,
+        inputTokenBudget: 2400,
     });
     const lean = plannerPayload({
         input,
         context,
-        inputTokenBudget: 4300,
+        inputTokenBudget: 1900,
         lean: true,
     });
 
-    assert.ok(normal.estimatedTokens <= 5000);
-    assert.ok(lean.estimatedTokens <= 4300);
+    assert.ok(normal.estimatedTokens <= 2400);
+    assert.ok(lean.estimatedTokens <= 1900);
     assert.ok(lean.estimatedTokens < normal.estimatedTokens);
     assert.equal(JSON.parse(normal.payload).msg, 'remind me in 10 minutes');
 });
