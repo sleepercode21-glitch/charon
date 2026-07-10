@@ -190,6 +190,8 @@ LLM_PLANNER_MAX_INPUT_TOKENS=2000
 LLM_PLANNER_RETRY_INPUT_TOKENS=1900
 LLM_PLANNER_TOKEN_ESTIMATE_MULTIPLIER=2.5
 LLM_PLANNER_MIN_REQUEST_TOKENS=6500
+LLM_PLANNER_MIN_REQUEST_INTERVAL_MS=20000
+LLM_PLANNER_RATE_LIMIT_COOLDOWN_MS=60000
 LLM_PLAN_MAX_OUTPUT_TOKENS=800
 LLM_RESPONSE_MAX_OUTPUT_TOKENS=1024
 LLM_MAX_SEQUENCE_ACTIONS=0
@@ -202,7 +204,7 @@ LLM_MAX_CONTEXT_POLLS=8
 LLM_TOKENS_PER_MINUTE=5200
 LLM_REQUESTS_PER_MINUTE=25
 LLM_PLANNER_TOKENS_PER_MINUTE=30000
-LLM_PLANNER_REQUESTS_PER_MINUTE=25
+LLM_PLANNER_REQUESTS_PER_MINUTE=3
 LLM_RATE_SAFETY_MULTIPLIER=1.35
 LLM_MIN_REQUEST_INTERVAL_MS=1750
 ```
@@ -221,7 +223,10 @@ Compound may reserve substantially more underlying-model capacity than the visib
 `LLM_PLANNER_TOKEN_ESTIMATE_MULTIPLIER` deliberately inflates local accounting, while
 `LLM_PLANNER_MIN_REQUEST_TOKENS` establishes a conservative floor. The defaults reserve at least
 6,500 tokens before the normal safety multiplier and use the 30K TPM ceiling reported by the
-underlying Scout model. This trades some latency for fewer provider-side 429 responses.
+underlying Scout model. Planner calls are spaced by at least 20 seconds. If Groq still returns 429
+because another process or project consumed the shared organization quota, Charon marks its local
+bucket empty, waits one full 60-second provider window, and retries once. This deliberately trades
+latency for fewer repeated 429 failures.
 
 ### Google Meet
 

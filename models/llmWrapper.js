@@ -59,6 +59,13 @@ function rateLimitsFor(model) {
     };
 }
 
+function minimumRequestIntervalFor(model) {
+    if (model === settings.llm.plannerModel) {
+        return Math.max(settings.llm.plannerMinRequestIntervalMs || 0, 0);
+    }
+    return Math.max(settings.llm.minRequestIntervalMs || 0, 0);
+}
+
 function rateStateFor(model) {
     if (!rateStates.has(model)) {
         const limits = rateLimitsFor(model);
@@ -94,7 +101,7 @@ function refillRateBuckets(model) {
 async function reserveLlmCapacity({ estimatedTokens, model }) {
     const { tokenLimit, requestLimit } = rateLimitsFor(model);
     const state = rateStateFor(model);
-    const minIntervalMs = Math.max(settings.llm.minRequestIntervalMs || 0, 0);
+    const minIntervalMs = minimumRequestIntervalFor(model);
     if (tokenLimit <= 0 && requestLimit <= 0 && minIntervalMs <= 0) {
         return { reservedTokens: 0 };
     }
@@ -175,6 +182,16 @@ function reconcileRejectedRequest({ reservedTokens, model }) {
     logger.info(`LLM rate guard released ${reservedTokens} reserved tokens for failed ${model} request.`);
 }
 
+function markProviderRateLimited(model) {
+    const state = rateStateFor(model);
+    const now = Date.now();
+    state.availableTokens = 0;
+    state.availableRequests = 0;
+    state.lastRateRefillAt = now;
+    state.lastLlmRequestAt = now;
+    logger.warn(`LLM rate guard synchronized ${model} to an empty provider window.`);
+}
+
 function createGroqChatModel(model, apiKey) {
     return {
         async invoke(messages, options = {}) {
@@ -205,7 +222,9 @@ function createGroqChatModel(model, apiKey) {
             });
 
             let parsed = null;
-            for (let attempt = 0; attempt < 3; attempt += 1) {
+            let plannerCooldownUsed = false;
+            let shortRetries = 0;
+            for (let attempt = 0; attempt < 4; attempt += 1) {
                 const response = await fetch(GROQ_CHAT_COMPLETIONS_URL, {
                     method: 'POST',
                     headers: {
@@ -225,16 +244,36 @@ function createGroqChatModel(model, apiKey) {
                 if (response.ok) break;
 
                 const delayMs = retryDelayFromGroq({ response, parsed });
-                if ((response.status === 429 || response.status === 503) && attempt < 2 && delayMs > 0 && delayMs <= 65_000) {
-                    logger.warn(`Groq asked Charon to wait ${Math.ceil(delayMs / 1000)}s for ${model}; retrying (${attempt + 1}/2).`);
+                const plannerRateLimit = model === settings.llm.plannerModel && response.status === 429;
+                if (plannerRateLimit && !plannerCooldownUsed) {
+                    plannerCooldownUsed = true;
+                    markProviderRateLimited(model);
+                    const cooldownMs = Math.min(Math.max(
+                        delayMs,
+                        settings.llm.plannerRateLimitCooldownMs || RATE_WINDOW_MS,
+                    ), RATE_WINDOW_MS);
+                    logger.warn(`Compound provider window is saturated; cooling down ${Math.ceil(cooldownMs / 1000)}s before one retry.`);
+                    await sleep(cooldownMs);
+                    continue;
+                }
+
+                if (!plannerRateLimit
+                    && (response.status === 429 || response.status === 503)
+                    && shortRetries < 2
+                    && delayMs > 0
+                    && delayMs <= 65_000) {
+                    shortRetries += 1;
+                    logger.warn(`Groq asked Charon to wait ${Math.ceil(delayMs / 1000)}s for ${model}; retrying (${shortRetries}/2).`);
                     await sleep(delayMs + 250);
                     continue;
                 }
 
-                reconcileRejectedRequest({
-                    reservedTokens: reservation?.reservedTokens || 0,
-                    model,
-                });
+                if (!plannerRateLimit) {
+                    reconcileRejectedRequest({
+                        reservedTokens: reservation?.reservedTokens || 0,
+                        model,
+                    });
+                }
                 const error = new Error(`[${response.status} ${response.statusText}] ${body}`);
                 error.status = response.status;
                 error.code = parsed?.error?.code || '';
@@ -283,4 +322,8 @@ function createLlmModel(modelOverride = null, purpose = 'response') {
     };
 }
 
-module.exports = { createLlmModel, estimateRequestCapacity };
+module.exports = {
+    createLlmModel,
+    estimateRequestCapacity,
+    minimumRequestIntervalFor,
+};

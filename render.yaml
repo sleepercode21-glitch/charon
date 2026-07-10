@@ -45,12 +45,18 @@ services:
         value: "2.5"
       - key: LLM_PLANNER_MIN_REQUEST_TOKENS
         value: "6500"
+      - key: LLM_PLANNER_MIN_REQUEST_INTERVAL_MS
+        value: "20000"
+      - key: LLM_PLANNER_RATE_LIMIT_COOLDOWN_MS
+        value: "60000"
       - key: LLM_CONTEXT_TOKEN_BUDGET
         value: "1600"
       - key: LLM_MAX_CONTEXT_MESSAGES
         value: "12"
       - key: LLM_PLANNER_TOKENS_PER_MINUTE
         value: "30000"
+      - key: LLM_PLANNER_REQUESTS_PER_MINUTE
+        value: "3"
       - key: WHATSAPP_GROUP_SCOPE
         value: all
       - key: WHATSAPP_GROUP_ID

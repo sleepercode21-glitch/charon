@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { settings } = require('../config/settings');
-const { estimateRequestCapacity } = require('../models/llmWrapper');
+const { estimateRequestCapacity, minimumRequestIntervalFor } = require('../models/llmWrapper');
 
 test('deliberately overestimates Compound capacity above provider-reported cost', () => {
     const originalMultiplier = settings.llm.plannerTokenEstimateMultiplier;
@@ -29,4 +29,9 @@ test('does not inflate response-model capacity estimates', () => {
         inputTokens: 1200,
         outputTokens: 320,
     }), 1520);
+});
+
+test('spaces Compound calls for the effective three-request budget', () => {
+    assert.equal(minimumRequestIntervalFor(settings.llm.plannerModel), 20000);
+    assert.equal(minimumRequestIntervalFor(settings.llm.responseModel), settings.llm.minRequestIntervalMs);
 });
