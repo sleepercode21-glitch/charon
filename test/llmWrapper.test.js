@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { settings } = require('../config/settings');
-const { estimateRequestCapacity, minimumRequestIntervalFor } = require('../models/llmWrapper');
+const { estimateRequestCapacity, minimumRequestIntervalFor, rotateKeys } = require('../models/llmWrapper');
 
 test('applies planner-only capacity padding', () => {
     const originalMultiplier = settings.llm.plannerTokenEstimateMultiplier;
@@ -35,4 +35,12 @@ test('does not inflate response capacity even when response uses the same model 
 test('spaces calls by purpose instead of model string', () => {
     assert.equal(minimumRequestIntervalFor(settings.llm.plannerModel, 'planner'), settings.llm.plannerMinRequestIntervalMs);
     assert.equal(minimumRequestIntervalFor(settings.llm.responseModel, 'response'), settings.llm.minRequestIntervalMs);
+});
+
+test('rotates planner key preference by stage', () => {
+    const keys = ['key-1', 'key-2', 'key-3'];
+    assert.deepEqual(rotateKeys(keys, 0), ['key-1', 'key-2', 'key-3']);
+    assert.deepEqual(rotateKeys(keys, 1), ['key-2', 'key-3', 'key-1']);
+    assert.deepEqual(rotateKeys(keys, 2), ['key-3', 'key-1', 'key-2']);
+    assert.deepEqual(rotateKeys(keys, 3), ['key-1', 'key-2', 'key-3']);
 });

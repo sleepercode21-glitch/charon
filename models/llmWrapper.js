@@ -1,5 +1,6 @@
 const { settings } = require('../config/settings');
 const { logger } = require('../utils/logger');
+const crypto = require('crypto');
 
 const GROQ_CHAT_COMPLETIONS_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const RATE_WINDOW_MS = 60 * 1000;
@@ -19,8 +20,14 @@ function isPlannerPurpose(purpose) {
     return purpose === 'planner';
 }
 
-function rateKeyFor(model, purpose = 'response') {
-    return `${purpose}:${model}`;
+function keyRefFor(apiKey, index = 0) {
+    return apiKey
+        ? crypto.createHash('sha256').update(apiKey).digest('hex').slice(0, 12)
+        : `missing-${index}`;
+}
+
+function rateKeyFor(model, purpose = 'response', keyRef = 'default') {
+    return `${purpose}:${model}:${keyRef}`;
 }
 
 function estimateRequestCapacity({ model, inputTokens, outputTokens, purpose = 'response' }) {
@@ -74,8 +81,8 @@ function minimumRequestIntervalFor(model, purpose = 'response') {
     return Math.max(settings.llm.minRequestIntervalMs || 0, 0);
 }
 
-function rateStateFor(model, purpose = 'response') {
-    const key = rateKeyFor(model, purpose);
+function rateStateFor(model, purpose = 'response', keyRef = 'default') {
+    const key = rateKeyFor(model, purpose, keyRef);
     if (!rateStates.has(key)) {
         const limits = rateLimitsFor(model, purpose);
         rateStates.set(key, {
@@ -89,8 +96,8 @@ function rateStateFor(model, purpose = 'response') {
     return rateStates.get(key);
 }
 
-function refillRateBuckets(model, purpose = 'response') {
-    const state = rateStateFor(model, purpose);
+function refillRateBuckets(model, purpose = 'response', keyRef = 'default') {
+    const state = rateStateFor(model, purpose, keyRef);
     const { tokenLimit, requestLimit } = rateLimitsFor(model, purpose);
     const now = Date.now();
     const elapsed = Math.max(0, now - state.lastRateRefillAt);
@@ -107,9 +114,14 @@ function refillRateBuckets(model, purpose = 'response') {
     return state;
 }
 
-async function reserveLlmCapacity({ estimatedTokens, model, purpose = 'response' }) {
+async function reserveLlmCapacity({
+    estimatedTokens,
+    model,
+    purpose = 'response',
+    keyRef = 'default',
+}) {
     const { tokenLimit, requestLimit } = rateLimitsFor(model, purpose);
-    const state = rateStateFor(model, purpose);
+    const state = rateStateFor(model, purpose, keyRef);
     const minIntervalMs = minimumRequestIntervalFor(model, purpose);
     if (tokenLimit <= 0 && requestLimit <= 0 && minIntervalMs <= 0) {
         return { reservedTokens: 0 };
@@ -122,7 +134,7 @@ async function reserveLlmCapacity({ estimatedTokens, model, purpose = 'response'
         const requestCost = requestLimit > 0 ? 1 : 0;
 
         while (true) {
-            refillRateBuckets(model, purpose);
+            refillRateBuckets(model, purpose, keyRef);
             const tokenReady = tokenLimit <= 0 || state.availableTokens >= tokenCost;
             const requestReady = requestLimit <= 0 || state.availableRequests >= requestCost;
             const intervalWait = minIntervalMs > 0
@@ -155,12 +167,18 @@ async function reserveLlmCapacity({ estimatedTokens, model, purpose = 'response'
     return queued;
 }
 
-function reconcileActualUsage({ actualTokens, reservedTokens, model, purpose = 'response' }) {
+function reconcileActualUsage({
+    actualTokens,
+    reservedTokens,
+    model,
+    purpose = 'response',
+    keyRef = 'default',
+}) {
     const { tokenLimit } = rateLimitsFor(model, purpose);
     if (tokenLimit <= 0 || !Number.isFinite(actualTokens) || actualTokens <= reservedTokens) return;
 
     const extra = actualTokens - reservedTokens;
-    const state = refillRateBuckets(model, purpose);
+    const state = refillRateBuckets(model, purpose, keyRef);
     state.availableTokens = Math.max(0, state.availableTokens - extra);
     logger.info(`LLM rate guard reconciled ${extra} extra tokens for ${model}; actual=${actualTokens}, reserved=${reservedTokens}.`);
 }
@@ -183,16 +201,21 @@ function retryDelayFromGroq({ response, parsed }) {
     return Math.ceil(amount);
 }
 
-function reconcileRejectedRequest({ reservedTokens, model, purpose = 'response' }) {
+function reconcileRejectedRequest({
+    reservedTokens,
+    model,
+    purpose = 'response',
+    keyRef = 'default',
+}) {
     const { tokenLimit } = rateLimitsFor(model, purpose);
     if (tokenLimit <= 0 || !reservedTokens) return;
-    const state = refillRateBuckets(model, purpose);
+    const state = refillRateBuckets(model, purpose, keyRef);
     state.availableTokens = Math.min(tokenLimit, state.availableTokens + reservedTokens);
     logger.info(`LLM rate guard released ${reservedTokens} reserved tokens for failed ${model} request.`);
 }
 
-function markProviderRateLimited(model, purpose = 'response') {
-    const state = rateStateFor(model, purpose);
+function markProviderRateLimited(model, purpose = 'response', keyRef = 'default') {
+    const state = rateStateFor(model, purpose, keyRef);
     const now = Date.now();
     state.availableTokens = 0;
     state.availableRequests = 0;
@@ -201,7 +224,130 @@ function markProviderRateLimited(model, purpose = 'response') {
     logger.warn(`LLM rate guard synchronized ${model} to an empty provider window.`);
 }
 
-function createGroqChatModel(model, apiKey, purpose = 'response') {
+async function invokeGroqWithKey({
+    model,
+    apiKey,
+    keyRef,
+    keyIndex,
+    hasFallbackKey,
+    purpose,
+    requestBody,
+    estimatedRequestTokens,
+}) {
+    const reservation = await reserveLlmCapacity({
+        estimatedTokens: estimatedRequestTokens,
+        model,
+        purpose,
+        keyRef,
+    });
+
+    let parsed = null;
+    let plannerCooldownUsed = false;
+    let shortRetries = 0;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+        const response = await fetch(GROQ_CHAT_COMPLETIONS_URL, {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+            },
+            body: requestBody,
+        });
+
+        const body = await response.text();
+        try {
+            parsed = JSON.parse(body);
+        } catch (_error) {
+            parsed = null;
+        }
+
+        if (response.ok) {
+            const result = {
+                content: parsed?.choices?.[0]?.message?.content || '',
+                usage_metadata: parsed?.usage ? {
+                    input_tokens: parsed.usage.prompt_tokens,
+                    output_tokens: parsed.usage.completion_tokens,
+                    total_tokens: parsed.usage.total_tokens,
+                } : undefined,
+            };
+
+            reconcileActualUsage({
+                actualTokens: result.usage_metadata?.total_tokens,
+                reservedTokens: reservation?.reservedTokens || 0,
+                model,
+                purpose,
+                keyRef,
+            });
+
+            return result;
+        }
+
+        const delayMs = retryDelayFromGroq({ response, parsed });
+        const retryableProviderLimit = response.status === 429 || response.status === 503;
+        const authOrProviderFailure = retryableProviderLimit || response.status === 401 || response.status === 403;
+        if (hasFallbackKey && authOrProviderFailure) {
+            if (retryableProviderLimit) markProviderRateLimited(model, purpose, keyRef);
+            else {
+                reconcileRejectedRequest({
+                    reservedTokens: reservation?.reservedTokens || 0,
+                    model,
+                    purpose,
+                    keyRef,
+                });
+            }
+            const error = new Error(`[${response.status} ${response.statusText}] Groq ${purpose} key ${keyIndex + 1} failed`);
+            error.status = response.status;
+            error.code = parsed?.error?.code || '';
+            if (delayMs > 0) error.retryAfterMs = delayMs;
+            throw error;
+        }
+
+        const plannerRateLimit = isPlannerPurpose(purpose) && response.status === 429;
+        if (plannerRateLimit && !plannerCooldownUsed) {
+            plannerCooldownUsed = true;
+            markProviderRateLimited(model, purpose, keyRef);
+            const cooldownMs = Math.min(Math.max(
+                delayMs,
+                settings.llm.plannerRateLimitCooldownMs || RATE_WINDOW_MS,
+            ), RATE_WINDOW_MS);
+            logger.warn(`Planner provider window is saturated; cooling down ${Math.ceil(cooldownMs / 1000)}s before one retry.`);
+            await sleep(cooldownMs);
+            continue;
+        }
+
+        if (!plannerRateLimit
+            && retryableProviderLimit
+            && shortRetries < 2
+            && delayMs > 0
+            && delayMs <= 65_000) {
+            shortRetries += 1;
+            logger.warn(`Groq asked Charon to wait ${Math.ceil(delayMs / 1000)}s for ${model}; retrying (${shortRetries}/2).`);
+            await sleep(delayMs + 250);
+            continue;
+        }
+
+        if (!plannerRateLimit) {
+            reconcileRejectedRequest({
+                reservedTokens: reservation?.reservedTokens || 0,
+                model,
+                purpose,
+                keyRef,
+            });
+        }
+        const error = new Error(`[${response.status} ${response.statusText}] ${body}`);
+        error.status = response.status;
+        error.code = parsed?.error?.code || '';
+        if (delayMs > 0) error.retryAfterMs = delayMs;
+        throw error;
+    }
+
+    const error = new Error(`Groq ${purpose} request failed after retries.`);
+    error.status = 503;
+    throw error;
+}
+
+function createGroqChatModel(model, apiKeys, purpose = 'response') {
+    const keys = (Array.isArray(apiKeys) ? apiKeys : [apiKeys]).filter(Boolean);
     return {
         async invoke(messages, options = {}) {
             const maxOutputTokens = options.maxOutputTokens || settings.llm.maxOutputTokens;
@@ -219,7 +365,6 @@ function createGroqChatModel(model, apiKey, purpose = 'response') {
             if (estimatedRequestTokens > estimatedInputTokens + maxOutputTokens) {
                 logger.info(`Planner capacity estimate raw=${estimatedInputTokens + maxOutputTokens} guarded=${estimatedRequestTokens}.`);
             }
-            const reservation = await reserveLlmCapacity({ estimatedTokens: estimatedRequestTokens, model, purpose });
             const requestBody = JSON.stringify({
                 model,
                 messages: messages.map((message) => ({
@@ -231,101 +376,53 @@ function createGroqChatModel(model, apiKey, purpose = 'response') {
                 ...(options.json ? { response_format: { type: 'json_object' } } : {}),
             });
 
-            let parsed = null;
-            let plannerCooldownUsed = false;
-            let shortRetries = 0;
-            for (let attempt = 0; attempt < 4; attempt += 1) {
-                const response = await fetch(GROQ_CHAT_COMPLETIONS_URL, {
-                    method: 'POST',
-                    headers: {
-                        Authorization: `Bearer ${apiKey}`,
-                        'Content-Type': 'application/json',
-                    },
-                    body: requestBody,
-                });
-
-                const body = await response.text();
+            let lastError = null;
+            for (const [keyIndex, apiKey] of keys.entries()) {
                 try {
-                    parsed = JSON.parse(body);
-                } catch (_error) {
-                    parsed = null;
-                }
-
-                if (response.ok) break;
-
-                const delayMs = retryDelayFromGroq({ response, parsed });
-                const plannerRateLimit = isPlannerPurpose(purpose) && response.status === 429;
-                if (plannerRateLimit && !plannerCooldownUsed) {
-                    plannerCooldownUsed = true;
-                    markProviderRateLimited(model, purpose);
-                    const cooldownMs = Math.min(Math.max(
-                        delayMs,
-                        settings.llm.plannerRateLimitCooldownMs || RATE_WINDOW_MS,
-                    ), RATE_WINDOW_MS);
-                    logger.warn(`Planner provider window is saturated; cooling down ${Math.ceil(cooldownMs / 1000)}s before one retry.`);
-                    await sleep(cooldownMs);
-                    continue;
-                }
-
-                if (!plannerRateLimit
-                    && (response.status === 429 || response.status === 503)
-                    && shortRetries < 2
-                    && delayMs > 0
-                    && delayMs <= 65_000) {
-                    shortRetries += 1;
-                    logger.warn(`Groq asked Charon to wait ${Math.ceil(delayMs / 1000)}s for ${model}; retrying (${shortRetries}/2).`);
-                    await sleep(delayMs + 250);
-                    continue;
-                }
-
-                if (!plannerRateLimit) {
-                    reconcileRejectedRequest({
-                        reservedTokens: reservation?.reservedTokens || 0,
+                    return await invokeGroqWithKey({
                         model,
+                        apiKey,
+                        keyRef: keyRefFor(apiKey, keyIndex),
+                        keyIndex,
+                        hasFallbackKey: keyIndex < keys.length - 1,
                         purpose,
+                        requestBody,
+                        estimatedRequestTokens,
                     });
+                } catch (error) {
+                    lastError = error;
+                    const canTryNext = keyIndex < keys.length - 1
+                        && [429, 503, 401, 403].includes(Number(error.status));
+                    if (!canTryNext) throw error;
+                    logger.warn(`Groq ${purpose} key ${keyIndex + 1} failed with ${error.status || 'error'}; trying fallback key ${keyIndex + 2}.`);
                 }
-                const error = new Error(`[${response.status} ${response.statusText}] ${body}`);
-                error.status = response.status;
-                error.code = parsed?.error?.code || '';
-                if (delayMs > 0) error.retryAfterMs = delayMs;
-                throw error;
             }
-
-            const result = {
-                content: parsed?.choices?.[0]?.message?.content || '',
-                usage_metadata: parsed?.usage ? {
-                    input_tokens: parsed.usage.prompt_tokens,
-                    output_tokens: parsed.usage.completion_tokens,
-                    total_tokens: parsed.usage.total_tokens,
-                } : undefined,
-            };
-
-            reconcileActualUsage({
-                actualTokens: result.usage_metadata?.total_tokens,
-                reservedTokens: reservation?.reservedTokens || 0,
-                model,
-                purpose,
-            });
-
-            return result;
+            throw lastError || new Error(`No Groq ${purpose} API keys are configured.`);
         },
     };
 }
 
-function createLlmModel(modelOverride = null, purpose = 'response') {
+function rotateKeys(apiKeys, startIndex = 0) {
+    const keys = (Array.isArray(apiKeys) ? apiKeys : [apiKeys]).filter(Boolean);
+    if (keys.length <= 1) return keys;
+    const offset = ((Math.floor(Number(startIndex) || 0) % keys.length) + keys.length) % keys.length;
+    return [...keys.slice(offset), ...keys.slice(0, offset)];
+}
+
+function createLlmModel(modelOverride = null, purpose = 'response', options = {}) {
     const model = modelOverride || settings.llm.responseModel;
-    const apiKey = purpose === 'planner'
-        ? settings.llm.plannerApiKey
-        : settings.llm.responseApiKey;
-    if (!apiKey) {
+    const configuredApiKeys = purpose === 'planner'
+        ? settings.llm.plannerApiKeys
+        : settings.llm.responseApiKeys;
+    const apiKeys = rotateKeys(configuredApiKeys, options.keyOffset || 0);
+    if (!apiKeys?.length) {
         const variable = purpose === 'planner'
-            ? 'GROQ_PLANNER_API_KEY (or GROQ_API_KEY)'
-            : 'GROQ_RESPONSE_API_KEY (or GROQ_API_KEY)';
+            ? 'GROQ_PLANNER_API_KEYS / GROQ_PLANNER_API_KEY (or GROQ_API_KEYS / GROQ_API_KEY)'
+            : 'GROQ_RESPONSE_API_KEYS / GROQ_RESPONSE_API_KEY (or GROQ_API_KEYS / GROQ_API_KEY)';
         throw new Error(`${variable} is required for the Groq ${purpose} model.`);
     }
 
-    const instance = createGroqChatModel(model, apiKey, purpose);
+    const instance = createGroqChatModel(model, apiKeys, purpose);
 
     return {
         async invoke(messages, options) {
@@ -338,4 +435,5 @@ module.exports = {
     createLlmModel,
     estimateRequestCapacity,
     minimumRequestIntervalFor,
+    rotateKeys,
 };

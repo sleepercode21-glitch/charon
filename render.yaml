@@ -17,7 +17,11 @@ services:
         sync: false
       - key: GROQ_PLANNER_API_KEY
         sync: false
+      - key: GROQ_PLANNER_API_KEYS
+        sync: false
       - key: GROQ_RESPONSE_API_KEY
+        sync: false
+      - key: GROQ_RESPONSE_API_KEYS
         sync: false
       - key: GROQ_PLANNER_MODEL
         value: llama-3.1-8b-instant
@@ -49,6 +53,8 @@ services:
         value: "500"
       - key: LLM_PLANNER_RATE_LIMIT_COOLDOWN_MS
         value: "60000"
+      - key: LLM_PLANNER_STAGES
+        value: "3"
       - key: LLM_CONTEXT_TOKEN_BUDGET
         value: "3000"
       - key: LLM_MAX_CONTEXT_MESSAGES

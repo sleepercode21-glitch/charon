@@ -2,7 +2,7 @@ const { Annotation, END, START, StateGraph } = require('@langchain/langgraph');
 const { HumanMessage, SystemMessage } = require('@langchain/core/messages');
 const { settings } = require('../../config/settings');
 const { createLlmModel } = require('../../models/llmWrapper');
-const { CHARON_SYSTEM_PROMPT } = require('../../models/prompts/charonSystemPrompt');
+const { PLANNER_STAGE_PROMPTS } = require('../../models/prompts/plannerPrompts');
 const { CHARON_RESPONSE_PROMPT } = require('../../models/prompts/responsePrompt');
 const { extractJson } = require('../../utils/json');
 const { logger } = require('../../utils/logger');
@@ -639,6 +639,207 @@ function compactQuotedContext(quoted, lean = false) {
     };
 }
 
+function normalizeNaturalTimeText(value) {
+    return String(value || '')
+        .replace(/\b([01]?\d|2[0-3])\s+om\b/ig, '$1 pm')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function dateFromTimestamp(value) {
+    if (!value) return null;
+    if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        const millis = value < 1e12 ? value * 1000 : value;
+        const date = new Date(millis);
+        return Number.isNaN(date.getTime()) ? null : date;
+    }
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function exactRelativeTimeEvidence(value, fallbackTimezone, referenceDate = new Date()) {
+    const text = normalizeNaturalTimeText(value);
+    const match = text.match(/\b(?:in|after)\s+(\d+)\s*(m|mins?|minutes?|h|hrs?|hours?|d|days?)\b/i)
+        || text.match(/\b(\d+)\s*(m|mins?|minutes?|h|hrs?|hours?|d|days?)\s+from\s+now\b/i);
+    if (!match) return null;
+
+    const amount = Number(match[1]);
+    if (!Number.isFinite(amount) || amount < 0) return null;
+    const unit = match[2].toLowerCase();
+    const multiplier = /^m/.test(unit) ? 60 * 1000
+        : /^h/.test(unit) ? 60 * 60 * 1000
+            : 24 * 60 * 60 * 1000;
+    const reference = dateFromTimestamp(referenceDate) || new Date();
+    const date = new Date(reference.getTime() + amount * multiplier);
+    return {
+        date: date.toISOString(),
+        timezone: normalizeTimezone(extractTimezone(text, fallbackTimezone), fallbackTimezone),
+        sourceText: text,
+        source: 'relative_duration',
+    };
+}
+
+function hasNaturalTimeSignal(value) {
+    const text = normalizeNaturalTimeText(value);
+    return /\b(in\s+\d+\s*(?:mins?|minutes?|hours?|hrs?|days?)|today|tomorrow|tonight|morning|afternoon|evening|noon|midnight|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}\s*(?:am|pm)|\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2})\b/i.test(text);
+}
+
+function naturalTimeEvidence(value, fallbackTimezone, referenceDate = new Date()) {
+    const text = normalizeNaturalTimeText(value);
+    if (!hasNaturalTimeSignal(text)) return null;
+    const exactRelative = exactRelativeTimeEvidence(text, fallbackTimezone, referenceDate);
+    if (exactRelative) return exactRelative;
+    const timezone = extractTimezone(text, fallbackTimezone);
+    const parsed = parseDate(text, dateFromTimestamp(referenceDate) || new Date(), timezone);
+    if (!parsed) return null;
+    return {
+        date: parsed.toISOString(),
+        timezone: normalizeTimezone(timezone, fallbackTimezone),
+        sourceText: text,
+    };
+}
+
+function pollOptionsWithVotes(input, context) {
+    const options = [];
+    const addOption = (name, votes = 0) => {
+        const text = String(name || '').trim();
+        if (!text) return;
+        options.push({
+            name: text,
+            votes: Number(votes || 0),
+        });
+    };
+
+    for (const option of input?.quoted?.pollOptions || []) {
+        addOption(option?.name || option, option?.votes);
+    }
+
+    for (const option of input?.quoted?.storedPoll?.options || []) {
+        addOption(option, 0);
+    }
+
+    const quotedId = String(input?.quoted?.id || '');
+    const contextPolls = Array.isArray(context?.polls) ? context.polls : [];
+    const matchingPoll = contextPolls.find((poll) => quotedId && String(poll.pollMessageId || '') === quotedId)
+        || contextPolls[0];
+    if (matchingPoll) {
+        const counts = new Map();
+        for (const vote of matchingPoll.votes || []) {
+            for (const selected of vote.selectedOptions || []) {
+                counts.set(selected, (counts.get(selected) || 0) + 1);
+            }
+        }
+        for (const option of matchingPoll.options || []) {
+            addOption(option, counts.get(option) || 0);
+        }
+    }
+
+    const byName = new Map();
+    for (const option of options) {
+        const key = option.name.toLowerCase();
+        const existing = byName.get(key);
+        if (!existing || option.votes > existing.votes) byName.set(key, option);
+    }
+    return [...byName.values()];
+}
+
+function bestPollScheduleEvidence(input, context) {
+    const timezone = input?.timezone || settings.timezone;
+    const pollName = String(input?.quoted?.pollName || input?.quoted?.body || '').trim();
+    const voted = pollOptionsWithVotes(input, context)
+        .filter((option) => option.votes > 0)
+        .sort((left, right) => right.votes - left.votes);
+    if (!voted.length) return null;
+
+    const timed = voted
+        .map((option) => ({
+            ...option,
+            time: naturalTimeEvidence(option.name, timezone),
+        }))
+        .filter((option) => option.time);
+    const highestTimedVotes = timed[0]?.votes || 0;
+    const timeLeaders = timed.filter((option) => option.votes === highestTimedVotes);
+    const timeOption = timeLeaders.length === 1 ? timeLeaders[0] : null;
+
+    const topics = voted.filter((option) => !naturalTimeEvidence(option.name, timezone));
+    const highestTopicVotes = topics[0]?.votes || 0;
+    const topicLeaders = topics.filter((option) => option.votes === highestTopicVotes);
+    const topicOption = topicLeaders.length === 1 ? topicLeaders[0] : null;
+
+    if (!timeOption && !topicOption) return null;
+    return {
+        date: timeOption?.time.date || '',
+        timezone: timeOption?.time.timezone || timezone,
+        timeText: timeOption?.name || '',
+        topic: topicOption?.name || '',
+        pollName,
+    };
+}
+
+function isGenericScheduleTitle(value, evidence = {}) {
+    const title = String(value || '').trim().toLowerCase();
+    if (!title) return true;
+    if (/^(session|meeting|meet|call|schedule|tech up meetup)$/i.test(title)) return true;
+    if (/^(system design|sydtem design)\s+(session|meeting|meet|call)$/i.test(title)) return Boolean(evidence.topic);
+    if (evidence.pollName && title === evidence.pollName.toLowerCase()) return true;
+    return false;
+}
+
+function pollEvidenceTitle(evidence, fallback = '') {
+    const pieces = [];
+    if (evidence.topic) pieces.push(evidence.topic);
+    if (evidence.pollName && !pieces.some((piece) => piece.toLowerCase() === evidence.pollName.toLowerCase())) {
+        pieces.push(evidence.pollName);
+    }
+    const title = pieces.join(' ').replace(/\s+/g, ' ').trim();
+    if (title) return /\b(session|meeting|meet|call)\b/i.test(title) ? title : `${title} session`;
+    return fallback || 'Session';
+}
+
+function repairActionWithEvidence(action, state, context) {
+    const plan = normalizedPlan(action, action?.source || 'llm');
+    const intent = normalizedIntent(plan.intent);
+    if (!['schedule', 'reminder', 'update'].includes(intent)) return plan;
+
+    const body = messageText(state.input.message);
+    const fallbackTimezone = state.input.timezone || settings.timezone;
+    const referenceDate = new Date();
+    const directTime = naturalTimeEvidence(body, fallbackTimezone, referenceDate);
+    const pollEvidence = intent === 'schedule' ? bestPollScheduleEvidence(state.input, context) : null;
+    const repaired = { ...plan };
+
+    if (directTime) {
+        repaired.date = directTime.date;
+        repaired.time = '';
+        repaired.timezone = directTime.timezone;
+        if (repaired.ask && ['schedule', 'reminder'].includes(intent)) repaired.ask = '';
+    } else if (pollEvidence?.date && (!repaired.date || repaired.ask)) {
+        repaired.date = pollEvidence.date;
+        repaired.time = '';
+        repaired.timezone = pollEvidence.timezone;
+        repaired.ask = '';
+    }
+
+    if (intent === 'schedule' && pollEvidence && isGenericScheduleTitle(repaired.title, pollEvidence)) {
+        repaired.title = pollEvidenceTitle(pollEvidence, repaired.title);
+        if (!repaired.text || isGenericScheduleTitle(repaired.text, pollEvidence)) repaired.text = repaired.title;
+    }
+
+    return repaired;
+}
+
+function repairPlanWithEvidence(rawPlan, state, context) {
+    if (!rawPlan || typeof rawPlan !== 'object') return rawPlan;
+    if (Array.isArray(rawPlan.actions)) {
+        return {
+            ...rawPlan,
+            actions: rawPlan.actions.map((action) => repairActionWithEvidence(action, state, context)),
+        };
+    }
+    return repairActionWithEvidence(rawPlan, state, context);
+}
+
 function plannerPayload({
     input,
     context,
@@ -660,7 +861,7 @@ function plannerPayload({
         quoted: compactQuotedContext(input.quoted, lean),
         pending: pendingClarification(context, input.message),
     };
-    const fixedTokens = estimateTokens(CHARON_SYSTEM_PROMPT) + estimateTokens(base);
+    const fixedTokens = estimateTokens(PLANNER_STAGE_PROMPTS[0]) + estimateTokens(base);
     const contextBudget = Math.max(250, inputTokenBudget - fixedTokens - 80);
     const compact = compactForPlanner(context, input.message, {
         maxTokens: contextBudget,
@@ -672,9 +873,88 @@ function plannerPayload({
     });
     return {
         payload,
-        estimatedTokens: estimateTokens(CHARON_SYSTEM_PROMPT) + estimateTokens(payload),
+        estimatedTokens: estimateTokens(PLANNER_STAGE_PROMPTS[0]) + estimateTokens(payload),
         contextTokens: compact.estimatedTokens,
         inputTokenBudget,
+    };
+}
+
+function plannerStageSystemPrompt(stage, totalStages) {
+    if (totalStages <= 1 || stage === 1) return PLANNER_STAGE_PROMPTS[0];
+    if (stage === totalStages) return PLANNER_STAGE_PROMPTS[2];
+    return PLANNER_STAGE_PROMPTS[1];
+}
+
+function plannerStagePayload(basePayload, previousOutputs = [], stage = 1, totalStages = 1) {
+    if (stage <= 1 || previousOutputs.length === 0) return basePayload;
+    const originalPayload = JSON.parse(basePayload);
+    const prior = previousOutputs.map((output, index) => ({
+        stage: index + 1,
+        raw: String(output || '').slice(0, 6000),
+        parsed: safeJson(output),
+    }));
+    if (stage === totalStages) {
+        return JSON.stringify({
+            stage: 'finalizer',
+            job: 'Choose final executable plan JSON from original evidence, draft, and repair.',
+            originalPayload,
+            draftOutput: prior[0] || null,
+            repairOutput: prior[prior.length - 1] || null,
+            allPreviousOutputs: prior,
+        });
+    }
+
+    return JSON.stringify({
+        stage: 'critic_repair',
+        job: 'Audit draft against original evidence and return corrected executable plan JSON.',
+        originalPayload,
+        draftOutput: prior[0] || null,
+        previousPlannerOutputs: prior,
+    });
+}
+
+async function invokePlannerChain({
+    plannerModels,
+    input,
+    context,
+    inputTokenBudget,
+    lean,
+}) {
+    const built = plannerPayload({
+        input,
+        context,
+        inputTokenBudget,
+        lean,
+    });
+    const totalStages = Math.max(1, Math.floor(settings.llm.plannerStages || 1));
+    const outputs = [];
+    let response = null;
+    let finalEstimatedTokens = built.estimatedTokens;
+
+    for (let stage = 1; stage <= totalStages; stage += 1) {
+        if (!plannerModels[stage - 1]) {
+            plannerModels[stage - 1] = createLlmModel(settings.llm.plannerModel, 'planner', {
+                keyOffset: stage - 1,
+            });
+        }
+        const systemPrompt = plannerStageSystemPrompt(stage, totalStages);
+        const payload = plannerStagePayload(built.payload, outputs, stage, totalStages);
+        finalEstimatedTokens = estimateTokens(systemPrompt) + estimateTokens(payload);
+        logger.info(`Planner stage ${stage}/${totalStages} keySlot=${stage} estimated=${finalEstimatedTokens}.`);
+        response = await plannerModels[stage - 1].invoke([
+            new SystemMessage(systemPrompt),
+            new HumanMessage(payload),
+        ], { json: true, maxOutputTokens: settings.llm.planMaxOutputTokens });
+        logModelUsage(`Planner stage ${stage}/${totalStages}`, response, finalEstimatedTokens);
+        logJson(`Planner stage ${stage}/${totalStages} raw`, response.content);
+        outputs.push(response.content);
+    }
+
+    return {
+        built,
+        response,
+        finalEstimatedTokens,
+        outputs,
     };
 }
 
@@ -1226,7 +1506,7 @@ function shouldUseDeterministicReply(state) {
 
 function createSchedulingGraph({ messageStore }) {
     let responseModel = null;
-    let plannerModel = null;
+    const plannerModels = [];
 
     function stateFromPlan({ state, context, rawPlan }) {
         const body = messageText(state.input.message);
@@ -1239,14 +1519,15 @@ function createSchedulingGraph({ messageStore }) {
                 source: 'sequence_limit',
             }
             : rawPlan;
-        const actions = normalizePlanActions(planInput);
+        const repairedPlanInput = repairPlanWithEvidence(planInput, state, context);
+        const actions = normalizePlanActions(repairedPlanInput);
         const isSequence = actions.length > 1
-            || (Array.isArray(planInput?.actions) && planInput.actions.length > 0);
+            || (Array.isArray(repairedPlanInput?.actions) && repairedPlanInput.actions.length > 0);
         const plan = isSequence
             ? {
                 intent: 'sequence',
                 actions,
-                source: String(planInput?.source || actions[0]?.source || 'llm'),
+                source: String(repairedPlanInput?.source || actions[0]?.source || 'llm'),
             }
             : actions[0] || normalizedPlan(commandModePlan('No valid action was planned.'));
         const decision = isSequence
@@ -1287,7 +1568,6 @@ function createSchedulingGraph({ messageStore }) {
             return stateFromPlan({ state, context, rawPlan: commandPlan });
         }
 
-        if (!plannerModel) plannerModel = createLlmModel(settings.llm.plannerModel, 'planner');
         try {
             const budgets = [...new Set([
                 settings.llm.plannerMaxInputTokens,
@@ -1296,22 +1576,23 @@ function createSchedulingGraph({ messageStore }) {
             let lastError = null;
 
             for (const [attempt, inputTokenBudget] of budgets.entries()) {
-                const built = plannerPayload({
+                const lean = attempt > 0 || inputTokenBudget <= 2200;
+                const preview = plannerPayload({
                     input: state.input,
                     context,
                     inputTokenBudget,
-                    lean: attempt > 0 || inputTokenBudget <= 2200,
+                    lean,
                 });
-                logger.info(`Planner payload attempt=${attempt + 1} estimated=${built.estimatedTokens} context=${built.contextTokens} budget=${inputTokenBudget}.`);
+                logger.info(`Planner payload attempt=${attempt + 1} estimated=${preview.estimatedTokens} context=${preview.contextTokens} budget=${inputTokenBudget}.`);
 
                 try {
-                    const response = await plannerModel.invoke([
-                        new SystemMessage(CHARON_SYSTEM_PROMPT),
-                        new HumanMessage(built.payload),
-                    ], { json: true, maxOutputTokens: settings.llm.planMaxOutputTokens });
-
-                    logModelUsage('Planner decision', response, built.estimatedTokens);
-                    logJson('Planner raw', response.content);
+                    const { response } = await invokePlannerChain({
+                        plannerModels,
+                        input: state.input,
+                        context,
+                        inputTokenBudget,
+                        lean,
+                    });
                     const parsed = safeJson(response.content);
                     if (!parsed) throw new Error('invalid_plan_json');
                     const finalPlan = parsed.plan || parsed.final || parsed;
@@ -1320,7 +1601,7 @@ function createSchedulingGraph({ messageStore }) {
                     lastError = error;
                     const canRetrySmaller = error?.status === 413 && attempt < budgets.length - 1;
                     if (!canRetrySmaller) throw error;
-                    logger.warn(`Planner model rejected payload at estimated=${built.estimatedTokens}; retrying with lean context.`);
+                    logger.warn(`Planner model rejected payload at estimated=${preview.estimatedTokens}; retrying with lean context.`);
                 }
             }
 
@@ -1479,5 +1760,8 @@ module.exports = {
     executePlanSequence,
     normalizePlanActions,
     plannerPayload,
+    plannerStagePayload,
+    plannerStageSystemPrompt,
+    repairPlanWithEvidence,
     resolvePlanReferences,
 };

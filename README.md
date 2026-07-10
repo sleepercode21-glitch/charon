@@ -111,6 +111,8 @@ Fill at least:
 MONGODB_URI=
 GROQ_API_KEY=
 GROQ_RESPONSE_API_KEY=
+GROQ_PLANNER_API_KEYS=
+GROQ_RESPONSE_API_KEYS=
 WHATSAPP_REPLY_MODE=tag_only
 WHATSAPP_GROUP_SCOPE=all
 ```
@@ -146,6 +148,8 @@ GROQ_RESPONSE_API_KEY=...
 `GROQ_API_KEY` remains the backward-compatible shared key and powers Groq Llama by default.
 Set `GROQ_PLANNER_API_KEY` to override the planner credential, and set `GROQ_RESPONSE_API_KEY` to
 give the response writer its own credential. Purpose-specific keys take precedence over the shared key.
+For fallback rotation, set comma-separated `GROQ_PLANNER_API_KEYS` and/or `GROQ_RESPONSE_API_KEYS`;
+Charon tries the next key on 429/503 or auth failure without logging secret values.
 
 ### WhatsApp
 
@@ -183,6 +187,8 @@ GROQ_PLANNER_MODEL=llama-3.1-8b-instant
 GROQ_RESPONSE_MODEL=llama-3.1-8b-instant
 GROQ_PLANNER_API_KEY=
 GROQ_RESPONSE_API_KEY=
+GROQ_PLANNER_API_KEYS=
+GROQ_RESPONSE_API_KEYS=
 LLM_MAX_OUTPUT_TOKENS=384
 LLM_MAX_CALL_INPUT_TOKENS=60000
 LLM_PLANNER_MAX_INPUT_TOKENS=3500
@@ -191,6 +197,7 @@ LLM_PLANNER_TOKEN_ESTIMATE_MULTIPLIER=1.2
 LLM_PLANNER_MIN_REQUEST_TOKENS=0
 LLM_PLANNER_MIN_REQUEST_INTERVAL_MS=500
 LLM_PLANNER_RATE_LIMIT_COOLDOWN_MS=60000
+LLM_PLANNER_STAGES=3
 LLM_PLAN_MAX_OUTPUT_TOKENS=800
 LLM_RESPONSE_MAX_OUTPUT_TOKENS=384
 LLM_MAX_SEQUENCE_ACTIONS=0
@@ -208,7 +215,7 @@ LLM_RATE_SAFETY_MULTIPLIER=1.15
 LLM_MIN_REQUEST_INTERVAL_MS=500
 ```
 
-Natural-language mode uses at most two LLM calls. `llama-3.1-8b-instant` receives the tagged message, quote, bot clock, pending clarification, recent messages, polls, and active database summaries, then returns one action or an ordered finite sequence. `LLM_MAX_SEQUENCE_ACTIONS=0` removes the application-level step cap; setting it above zero restores a deployment-specific limit. The actual sequence must still fit in the planner model's finite JSON output.
+Natural-language mode uses a staged planner and one response writer. By default `LLM_PLANNER_STAGES=3` runs three purpose-built prompts from `models/prompts/plannerPrompts.js`: draft planner → critic/repair planner → finalizer planner. Each stage has a different prompt and payload shape, and each stage feeds its output into the next. Stage 1 prefers planner key 1, stage 2 prefers planner key 2, and stage 3 prefers planner key 3; every stage can still rotate through fallback keys on 429/503/auth failure. `llama-3.1-8b-instant` receives the tagged message, quote, bot clock, pending clarification, recent messages, polls, and active database summaries, then returns one action or an ordered finite sequence. `LLM_MAX_SEQUENCE_ACTIONS=0` removes the application-level step cap; setting it above zero restores a deployment-specific limit. The actual sequence must still fit in the planner model's finite JSON output.
 
 Charon preflights the whole sequence, executes steps in order, and can pass nested results such as an earlier Meet link, public id, or listed item into later steps. After local tools run, `llama-3.1-8b-instant` normally writes one truthful response. Sequences longer than `LLM_SEQUENCE_RESPONSE_MAX_STEPS` use the deterministic response writer, avoiding another model call. Command mode uses no LLM calls.
 

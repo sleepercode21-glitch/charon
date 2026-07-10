@@ -434,7 +434,7 @@ async function handleVoteUpdate(vote) {
 
 async function main() {
     startHealthServer();
-    logger.info(`LLM config: planner=${settings.llm.plannerModel}, response=${settings.llm.responseModel}, plannerBudget=${settings.llm.plannerMaxInputTokens}/${settings.llm.plannerRetryInputTokens}, plannerRate=${settings.llm.plannerTokensPerMinute}tpm/${settings.llm.plannerRequestsPerMinute}rpm, responseRate=${settings.llm.tokensPerMinute}tpm/${settings.llm.requestsPerMinute}rpm.`);
+    logger.info(`LLM config: planner=${settings.llm.plannerModel}, response=${settings.llm.responseModel}, plannerStages=${settings.llm.plannerStages}, plannerKeys=${settings.llm.plannerApiKeys.length}, responseKeys=${settings.llm.responseApiKeys.length}, plannerBudget=${settings.llm.plannerMaxInputTokens}/${settings.llm.plannerRetryInputTokens}, plannerRate=${settings.llm.plannerTokensPerMinute}tpm/${settings.llm.plannerRequestsPerMinute}rpm, responseRate=${settings.llm.tokensPerMinute}tpm/${settings.llm.requestsPerMinute}rpm.`);
 
     if (!settings.mongodbUri) {
         throw new Error('MONGODB_URI is required.');

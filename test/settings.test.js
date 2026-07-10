@@ -11,6 +11,8 @@ function loadKeySelection(env) {
         process.stdout.write(JSON.stringify({
             planner: settings.llm.plannerApiKey,
             response: settings.llm.responseApiKey,
+            plannerKeys: settings.llm.plannerApiKeys,
+            responseKeys: settings.llm.responseApiKeys,
         }));
     `;
     const output = execFileSync(process.execPath, ['-e', script], {
@@ -44,6 +46,8 @@ test('uses the shared Groq key as a backward-compatible fallback', () => {
     }), {
         planner: 'shared-test-key',
         response: 'shared-test-key',
+        plannerKeys: ['shared-test-key'],
+        responseKeys: ['shared-test-key'],
     });
 });
 
@@ -55,6 +59,23 @@ test('uses independent planner and response Groq keys when configured', () => {
     }), {
         planner: 'planner-test-key',
         response: 'response-test-key',
+        plannerKeys: ['planner-test-key', 'shared-test-key'],
+        responseKeys: ['response-test-key', 'shared-test-key'],
+    });
+});
+
+test('uses comma-separated Groq key pools before single-key fallbacks', () => {
+    assert.deepEqual(loadKeySelection({
+        GROQ_API_KEY: 'shared-test-key',
+        GROQ_PLANNER_API_KEY: 'planner-single-key',
+        GROQ_RESPONSE_API_KEY: 'response-single-key',
+        GROQ_PLANNER_API_KEYS: 'planner-pool-1,planner-pool-2',
+        GROQ_RESPONSE_API_KEYS: 'response-pool-1 response-pool-2',
+    }), {
+        planner: 'planner-pool-1',
+        response: 'response-pool-1',
+        plannerKeys: ['planner-pool-1', 'planner-pool-2', 'planner-single-key', 'shared-test-key'],
+        responseKeys: ['response-pool-1', 'response-pool-2', 'response-single-key', 'shared-test-key'],
     });
 });
 
@@ -87,6 +108,7 @@ test('coerces stale Compound/Qwen env overrides to Llama instant defaults', () =
     assert.equal(llm.plannerTokenEstimateMultiplier, 1.2);
     assert.equal(llm.plannerMinRequestTokens, 0);
     assert.equal(llm.plannerMinRequestIntervalMs, 500);
+    assert.equal(llm.plannerStages, 3);
     assert.equal(llm.responseMaxOutputTokens, 384);
     assert.equal(llm.contextTokenBudget, 3000);
     assert.equal(llm.maxContextMessages, 20);

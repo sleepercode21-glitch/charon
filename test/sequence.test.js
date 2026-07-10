@@ -4,8 +4,10 @@ const assert = require('node:assert/strict');
 const {
     executePlanSequence,
     normalizePlanActions,
+    repairPlanWithEvidence,
     resolvePlanReferences,
 } = require('../agents/workflows/schedulingGraph');
+const { formatForChat, parseDate } = require('../utils/time');
 
 test('normalizes and bounds ordered action plans', () => {
     const actions = normalizePlanActions({
@@ -198,4 +200,82 @@ test('executes a long finite workflow without truncating steps', async () => {
     assert.equal(seen.length, 30);
     assert.equal(seen[1], 'Step 2 after Step 1');
     assert.match(seen[29], /^Step 30 after Step 29/);
+});
+
+test('repairs schedule time and title from a quoted winning poll', () => {
+    const repaired = repairPlanWithEvidence({
+        actions: [{
+            intent: 'schedule',
+            title: 'System design session',
+            text: '',
+            date: '',
+            timezone: '',
+            ask: '',
+        }],
+    }, {
+        input: {
+            timezone: 'America/Phoenix',
+            message: { body: '@bot pls schedule the session' },
+            quoted: {
+                body: 'System design',
+                pollName: 'System design',
+                pollOptions: [
+                    { name: 'Youtube', votes: 1 },
+                    { name: 'Logger', votes: 0 },
+                    { name: '2 pm est saturday', votes: 1 },
+                    { name: '4 pm est sunday', votes: 0 },
+                ],
+            },
+        },
+    }, { polls: [] });
+
+    const action = repaired.actions[0];
+    assert.equal(action.title, 'Youtube System design session');
+    assert.equal(action.timezone, 'America/New_York');
+    assert.equal(formatForChat(new Date(action.date), action.timezone), 'Sat, Jul 11, 2:00 PM EDT');
+});
+
+test('repairs planner UTC hallucination from explicit local-time body text', () => {
+    const repaired = repairPlanWithEvidence({
+        intent: 'schedule',
+        title: 'youtube system design session',
+        date: '2026-07-11T12:00:00Z',
+        timezone: 'America/Chicago',
+    }, {
+        input: {
+            timezone: 'America/Phoenix',
+            message: {
+                body: '@bot please book a session for youtube system design at 12 om cst monday',
+            },
+        },
+    }, {});
+
+    const expected = parseDate('12 pm cst monday', new Date(), 'America/Chicago');
+    assert.equal(repaired.timezone, 'America/Chicago');
+    assert.equal(repaired.date, expected.toISOString());
+    assert.match(formatForChat(new Date(repaired.date), repaired.timezone), /12:00 PM CDT$/);
+});
+
+test('repairs relative reminder arithmetic from current computer time', () => {
+    const before = Date.now();
+    const repaired = repairPlanWithEvidence({
+        intent: 'reminder',
+        text: 'go to dance class',
+        date: new Date(before + 15 * 60 * 1000).toISOString(),
+        timezone: '',
+    }, {
+        input: {
+            timezone: 'America/Phoenix',
+            message: {
+                body: '@bot remind me in 5 mins to go to dance class',
+                timestamp: 1,
+            },
+        },
+    }, {});
+    const after = Date.now();
+
+    const repairedAt = Date.parse(repaired.date);
+    assert.ok(repairedAt >= before + 5 * 60 * 1000);
+    assert.ok(repairedAt <= after + 5 * 60 * 1000 + 1000);
+    assert.equal(repaired.timezone, 'America/Phoenix');
 });

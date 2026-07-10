@@ -52,6 +52,21 @@ function llamaNumberFromEnv(name, fallback) {
     });
 }
 
+function splitSecretList(value) {
+    return String(value || '')
+        .split(/[,\s]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+}
+
+function secretListFromEnv(names) {
+    const values = [];
+    for (const name of names) {
+        values.push(...splitSecretList(process.env[name]));
+    }
+    return [...new Set(values)];
+}
+
 function csvNumbersFromEnv(name, fallback) {
     if (!process.env[name]) return fallback;
     const values = process.env[name]
@@ -60,6 +75,19 @@ function csvNumbersFromEnv(name, fallback) {
         .filter((value) => Number.isFinite(value) && value >= 0);
     return values.length > 0 ? values : fallback;
 }
+
+const plannerApiKeys = secretListFromEnv([
+    'GROQ_PLANNER_API_KEYS',
+    'GROQ_PLANNER_API_KEY',
+    'GROQ_API_KEYS',
+    'GROQ_API_KEY',
+]);
+const responseApiKeys = secretListFromEnv([
+    'GROQ_RESPONSE_API_KEYS',
+    'GROQ_RESPONSE_API_KEY',
+    'GROQ_API_KEYS',
+    'GROQ_API_KEY',
+]);
 
 const settings = {
     appName: 'charon',
@@ -77,8 +105,10 @@ const settings = {
         provider: 'groq',
         plannerModel: groqModelFromEnv('GROQ_PLANNER_MODEL'),
         responseModel: groqModelFromEnv('GROQ_RESPONSE_MODEL'),
-        plannerApiKey: process.env.GROQ_PLANNER_API_KEY || process.env.GROQ_API_KEY,
-        responseApiKey: process.env.GROQ_RESPONSE_API_KEY || process.env.GROQ_API_KEY,
+        plannerApiKey: plannerApiKeys[0] || '',
+        responseApiKey: responseApiKeys[0] || '',
+        plannerApiKeys,
+        responseApiKeys,
         temperature: numberFromEnv('LLM_TEMPERATURE', 0.1),
         maxOutputTokens: numberFromEnv('LLM_MAX_OUTPUT_TOKENS', 384),
         maxCallInputTokens: llamaNumberFromEnv('LLM_MAX_CALL_INPUT_TOKENS', 60000),
@@ -89,6 +119,7 @@ const settings = {
         plannerMinRequestIntervalMs: llamaNumberFromEnv('LLM_PLANNER_MIN_REQUEST_INTERVAL_MS', 500),
         plannerRateLimitCooldownMs: numberFromEnv('LLM_PLANNER_RATE_LIMIT_COOLDOWN_MS', 60000),
         planMaxOutputTokens: numberFromEnv('LLM_PLAN_MAX_OUTPUT_TOKENS', 800),
+        plannerStages: Math.max(1, Math.floor(numberFromEnv('LLM_PLANNER_STAGES', 3))),
         responseMaxOutputTokens: llamaNumberFromEnv('LLM_RESPONSE_MAX_OUTPUT_TOKENS', 384),
         maxSequenceActions: Math.max(0, Math.floor(numberFromEnv('LLM_MAX_SEQUENCE_ACTIONS', 0))),
         sequenceResponseMaxSteps: Math.max(0, Math.floor(numberFromEnv('LLM_SEQUENCE_RESPONSE_MAX_STEPS', 12))),
