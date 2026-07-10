@@ -6,7 +6,6 @@ const {
     normalizePlanActions,
     repairPlanWithEvidence,
     resolvePlanReferences,
-    simpleRelativeReminderPlan,
 } = require('../agents/workflows/schedulingGraph');
 const { formatForChat, parseDate } = require('../utils/time');
 
@@ -279,32 +278,4 @@ test('repairs relative reminder arithmetic from current computer time', () => {
     assert.ok(repairedAt >= before + 5 * 60 * 1000);
     assert.ok(repairedAt <= after + 5 * 60 * 1000 + 1000);
     assert.equal(repaired.timezone, 'America/Phoenix');
-});
-
-test('plans simple relative reminders deterministically without LLM planner', () => {
-    const reference = new Date('2026-07-10T19:22:16.000Z');
-    const plan = simpleRelativeReminderPlan(
-        '@25246606303346 remind us in 2 minutes to check if Charon reminders are working',
-        'America/Phoenix',
-        reference,
-    );
-
-    assert.equal(plan.intent, 'reminder');
-    assert.equal(plan.text, 'check if Charon reminders are working');
-    assert.equal(plan.date, '2026-07-10T19:24:16.000Z');
-    assert.equal(plan.timezone, 'America/Phoenix');
-    assert.equal(plan.source, 'deterministic_relative_reminder');
-});
-
-test('extracts reminder text when relative duration comes after the task', () => {
-    const reference = new Date('2026-07-10T19:22:16.000Z');
-    const plan = simpleRelativeReminderPlan(
-        '@bot remind me to check Charon reminders in 2 minutes',
-        'America/Phoenix',
-        reference,
-    );
-
-    assert.equal(plan.intent, 'reminder');
-    assert.equal(plan.text, 'check Charon reminders');
-    assert.equal(plan.date, '2026-07-10T19:24:16.000Z');
 });

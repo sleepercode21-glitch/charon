@@ -29,11 +29,11 @@ test('registers exactly four production prompts', () => {
     assert.equal(CHARON_PROMPTS.response, CHARON_RESPONSE_PROMPT);
 });
 
-test('keeps each production prompt around the 400-500 token budget', () => {
+test('keeps production prompts within expanded context budget', () => {
     for (const [name, prompt] of Object.entries(CHARON_PROMPTS)) {
         const estimatedTokens = Math.ceil(prompt.length / 4);
         assert.ok(
-            estimatedTokens >= 400 && estimatedTokens <= 500,
+            estimatedTokens >= 400 && estimatedTokens <= 1200,
             `${name} prompt estimated ${estimatedTokens} tokens`,
         );
     }
@@ -63,6 +63,15 @@ test('uses three dedicated planner prompts instead of one extended prompt', () =
     assert.match(PLANNER_DRAFT_PROMPT, /stage 1: INTENT AND CONTEXT/);
     assert.match(PLANNER_REPAIR_PROMPT, /stage 2: PLAN BUILDER/);
     assert.match(PLANNER_FINAL_PROMPT, /stage 3: FINALIZER/);
+});
+
+test('planner prompts describe action capabilities and finite workflows', () => {
+    assert.match(PLANNER_DRAFT_PROMPT, /Available actions:/);
+    assert.match(PLANNER_REPAIR_PROMPT, /finite actionable steps/);
+    assert.match(PLANNER_REPAIR_PROMPT, /list active meetings/);
+    assert.match(PLANNER_REPAIR_PROMPT, /move\/reschedule\/change time/);
+    assert.match(PLANNER_FINAL_PROMPT, /Verify kind scoping/);
+    assert.match(PLANNER_FINAL_PROMPT, /Verify update semantics/);
 });
 
 test('uses stage-specific planner payload shapes', () => {

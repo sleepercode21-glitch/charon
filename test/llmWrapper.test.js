@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const { settings } = require('../config/settings');
 const { estimateRequestCapacity, minimumRequestIntervalFor, rotateKeys } = require('../models/llmWrapper');
@@ -43,4 +45,10 @@ test('rotates planner key preference by stage', () => {
     assert.deepEqual(rotateKeys(keys, 1), ['key-2', 'key-3', 'key-1']);
     assert.deepEqual(rotateKeys(keys, 2), ['key-3', 'key-1', 'key-2']);
     assert.deepEqual(rotateKeys(keys, 3), ['key-1', 'key-2', 'key-3']);
+});
+
+test('rate guard waits asynchronously instead of queueing sleeps', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'models', 'llmWrapper.js'), 'utf8');
+    assert.doesNotMatch(source, /state\.queue|queue:\s*Promise\.resolve/);
+    assert.match(source, /rate guard async wait/);
 });

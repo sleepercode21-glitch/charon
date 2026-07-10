@@ -700,70 +700,6 @@ function naturalTimeEvidence(value, fallbackTimezone, referenceDate = new Date()
     };
 }
 
-function relativeTimePattern() {
-    return /\b(?:(?:in|after)\s+\d+\s*(?:m|mins?|minutes?|h|hrs?|hours?|d|days?)|\d+\s*(?:m|mins?|minutes?|h|hrs?|hours?|d|days?)\s+from\s+now)\b/i;
-}
-
-function stripBotMentions(value) {
-    return String(value || '')
-        .replace(/@\S+/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-}
-
-function reminderTextFromRelativeRequest(value) {
-    const text = stripBotMentions(value);
-    if (!/\bremind(?:er)?\b/i.test(text) || !relativeTimePattern().test(text)) return '';
-
-    let reminderText = text
-        .replace(/^.*?\bremind(?:er)?\s*(?:me|us|everyone|everybody|all|the\s+group)?\b/i, ' ')
-        .replace(relativeTimePattern(), ' ')
-        .replace(/^(?:to|that|about|for)\s+/i, ' ')
-        .replace(/\s+(?:to|that|about|for)\s+$/i, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-    if (!reminderText) {
-        const trailing = text.match(new RegExp(`${relativeTimePattern().source}\\s+(?:to|that|about|for)?\\s*([\\s\\S]+)$`, 'i'));
-        reminderText = trailing?.[1] || '';
-    }
-
-    return reminderText
-        .replace(/^(?:to|that|about|for)\s+/i, '')
-        .replace(/[.!?\s]+$/g, '')
-        .trim();
-}
-
-function simpleRelativeReminderPlan(value, timezone = settings.timezone, referenceDate = new Date()) {
-    const body = stripBotMentions(value);
-    if (!/\bremind(?:er)?\b/i.test(body)) return null;
-
-    const time = exactRelativeTimeEvidence(body, timezone, referenceDate);
-    if (!time) return null;
-
-    const text = reminderTextFromRelativeRequest(body);
-    if (!text) {
-        return {
-            intent: 'reminder',
-            text: '',
-            date: time.date,
-            time: '',
-            timezone: time.timezone,
-            ask: 'What should I remind the group about?',
-            source: 'deterministic_relative_reminder',
-        };
-    }
-
-    return {
-        intent: 'reminder',
-        text,
-        date: time.date,
-        time: '',
-        timezone: time.timezone,
-        source: 'deterministic_relative_reminder',
-    };
-}
-
 function pollOptionsWithVotes(input, context) {
     const options = [];
     const addOption = (name, votes = 0) => {
@@ -1263,6 +1199,7 @@ function planToDecision(plan, body) {
     } else if (intent === 'update') {
         decision.update = {
             target: target || plan.title || 'last meeting',
+            kind,
             title: plan.title || '',
             description: plan.text || '',
             text: plan.text || '',
@@ -1663,7 +1600,9 @@ function shouldUseDeterministicReply(state) {
         ? state.actionResult.steps?.length || 0
         : 0;
     const deterministicSequenceThreshold = settings.llm.sequenceResponseMaxSteps;
-    return String(state.plan?.source || '').startsWith('command')
+    return ACTION_INTENTS.has(state.decision?.intent)
+        || state.decision?.intent === 'sequence'
+        || String(state.plan?.source || '').startsWith('command')
         || (deterministicSequenceThreshold > 0 && sequenceSteps > deterministicSequenceThreshold);
 }
 
@@ -1730,16 +1669,6 @@ function createSchedulingGraph({ messageStore }) {
             logJson('Command plan', commandPlan);
             return stateFromPlan({ state, context, rawPlan: commandPlan });
         }
-        const deterministicReminder = simpleRelativeReminderPlan(
-            body,
-            state.input.timezone || settings.timezone,
-            new Date(),
-        );
-        if (deterministicReminder) {
-            logJson('Deterministic relative reminder plan', deterministicReminder);
-            return stateFromPlan({ state, context, rawPlan: deterministicReminder });
-        }
-
         try {
             const budgets = [...new Set([
                 settings.llm.plannerMaxInputTokens,
@@ -1936,5 +1865,4 @@ module.exports = {
     plannerStageSystemPrompt,
     repairPlanWithEvidence,
     resolvePlanReferences,
-    simpleRelativeReminderPlan,
 };

@@ -8,9 +8,18 @@ Inputs:
 - quoted resolves "this/that/the poll"; pending resolves short follow-ups.
 - roomContext.signals/polls/msgs/meetings/reminders provide scoped evidence.
 
-Intent mapping: remind->reminder; schedule/book/create meet/session/call->schedule;
-move/reschedule/edit/rename->update; cancel/delete/remove->cancel; done/complete->complete;
-show/list/get link/how many->list; tag/tell/announce->announce; normal questions->answer.
+Available actions:
+- schedule: create meeting/Meet link; reminder: create reminder; update: move/rename active item.
+- cancel: cancel active item(s); complete: mark done; list: show active items or link.
+- announce: send group text; answer/refuse: conversational only.
+
+Intent mapping:
+- remind/ping/nudge/tell later -> reminder.
+- schedule/book/create/set up meet/session/call -> schedule.
+- move/reschedule/change time/edit/rename -> update; distinguish time move vs title rename.
+- cancel/delete/remove/clear -> cancel; done/complete/finished -> complete.
+- list/show/how many/upcoming/get link -> list; tag/tell/announce -> announce.
+- normal questions -> answer/refuse.
 
 Return an INTENT_CONTEXT JSON object, not an executable ACTION:
 {
@@ -27,10 +36,12 @@ Rules:
 - Identify every requested operation in order; multi-step requests become multiple actionsNeeded.
 - Resolve what "this/that/it/the poll/last/next" refers to using quoted, pending, and roomContext.
 - Treat quoted as strongest context, then pending, active items, polls, recent msgs, then signals.
+- For "last/latest/previous", prefer the most recently mentioned/listed matching item; for "next", prefer next upcoming.
+- If user says "active meetings", "meetings", "sessions", or "schedules", reference kind=meeting only, not reminders.
 - For "in N minutes/hours/days", compute resolvedUtc from clock.timestampMs.
 - Mark poll winners/ties, active ids/titles, pending asks, and exact user wording as references.
 - If a request refers to context implicitly, name the strongest evidence and any ambiguity.
-- Keep notes practical: what stage 2 must use, avoid, ask, or sequence.
+- Keep notes practical: exact finite steps, target references, time interpretation, what to avoid, and what to ask.
 - Do not claim success, call tools, invent ids, or output ACTION schema here.
 Valid JSON only.
 `;

@@ -5,6 +5,29 @@ function wantsTimeChange(update) {
     return Boolean(update?.start || update?.end || update?.dueAt || update?.timezone);
 }
 
+function relativeTargetKind(update, target) {
+    const text = [target, update?.target, update?.kind, update?.text, update?.description, update?.title]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+    const relative = /\b(last|latest|previous|next|nearest|recent|this|that|it)\b/.test(text);
+    if (!relative) return '';
+    if (/\b(reminder|ping|nudge)\b/.test(text)) return 'reminder';
+    if (/\b(meeting|meet|session|schedule)\b/.test(text)) return 'meeting';
+    return update?.kind === 'meeting' || update?.kind === 'reminder' ? update.kind : '';
+}
+
+function chooseRelativeActiveItem(items, target) {
+    const text = String(target || '').toLowerCase();
+    if (/\b(last|latest|previous|recent|that|it|this)\b/.test(text)) {
+        return [...items].sort((left, right) => (
+            new Date(right.item?.createdAt || right.item?.updatedAt || 0)
+            - new Date(left.item?.createdAt || left.item?.updatedAt || 0)
+        ))[0] || null;
+    }
+    return items[0] || null;
+}
+
 function canReviveCancelledMeeting(update, target) {
     const text = [target, update?.text, update?.description, update?.title].filter(Boolean).join(' ');
     return /\b(last|cancelled|canceled|previous|it|that|meet|meeting|session)\b/i.test(text)
@@ -25,7 +48,21 @@ async function updateActiveItem({ decision, timeResolution, chat, messageStore }
     const update = decision.update || {};
     const target = update.target || '';
     const chatId = chat.id?._serialized || chat.id;
+    let resolvedTarget = target;
     let active = await messageStore.findActiveItem({ chatId, target });
+    if (!active) {
+        const relativeKind = relativeTargetKind(update, target);
+        if (relativeKind) {
+            const matches = await messageStore.findActiveItems({
+                chatId,
+                kind: relativeKind,
+                target: '',
+                limit: 5,
+            });
+            active = chooseRelativeActiveItem(matches, target);
+            if (active?.item?._id) resolvedTarget = String(active.item._id).slice(-6);
+        }
+    }
 
     if (!active) {
         if (canReviveCancelledMeeting(update, target) && wantsTimeChange(update)) {
@@ -115,7 +152,7 @@ async function updateActiveItem({ decision, timeResolution, chat, messageStore }
 
         const result = await messageStore.updateActiveItem({
             chatId,
-            target,
+            target: resolvedTarget,
             updates: {
                 text,
                 dueAt,
@@ -175,7 +212,7 @@ async function updateActiveItem({ decision, timeResolution, chat, messageStore }
 
     const result = await messageStore.updateActiveItem({
         chatId,
-        target,
+        target: resolvedTarget,
         updates: {
             title,
             description,

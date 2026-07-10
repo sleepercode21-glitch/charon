@@ -90,7 +90,6 @@ function rateStateFor(model, purpose = 'response', keyRef = 'default') {
             availableRequests: settings.llm.rateStartFull ? limits.requestLimit : 0,
             lastRateRefillAt: Date.now(),
             lastLlmRequestAt: 0,
-            queue: Promise.resolve(),
         });
     }
     return rateStates.get(key);
@@ -127,44 +126,38 @@ async function reserveLlmCapacity({
         return { reservedTokens: 0 };
     }
 
-    const reserve = async () => {
-        const safety = Math.max(Number(settings.llm.rateSafetyMultiplier || 1), 1);
-        const safeEstimate = Math.ceil(Math.max(estimatedTokens, 1) * safety);
-        const tokenCost = tokenLimit > 0 ? Math.min(safeEstimate, tokenLimit) : 0;
-        const requestCost = requestLimit > 0 ? 1 : 0;
+    const safety = Math.max(Number(settings.llm.rateSafetyMultiplier || 1), 1);
+    const safeEstimate = Math.ceil(Math.max(estimatedTokens, 1) * safety);
+    const tokenCost = tokenLimit > 0 ? Math.min(safeEstimate, tokenLimit) : 0;
+    const requestCost = requestLimit > 0 ? 1 : 0;
 
-        while (true) {
-            refillRateBuckets(model, purpose, keyRef);
-            const tokenReady = tokenLimit <= 0 || state.availableTokens >= tokenCost;
-            const requestReady = requestLimit <= 0 || state.availableRequests >= requestCost;
-            const intervalWait = minIntervalMs > 0
-                ? Math.max(0, state.lastLlmRequestAt + minIntervalMs - Date.now())
-                : 0;
-            const intervalReady = intervalWait <= 0;
+    while (true) {
+        refillRateBuckets(model, purpose, keyRef);
+        const tokenReady = tokenLimit <= 0 || state.availableTokens >= tokenCost;
+        const requestReady = requestLimit <= 0 || state.availableRequests >= requestCost;
+        const intervalWait = minIntervalMs > 0
+            ? Math.max(0, state.lastLlmRequestAt + minIntervalMs - Date.now())
+            : 0;
+        const intervalReady = intervalWait <= 0;
 
-            if (tokenReady && requestReady && intervalReady) {
-                if (tokenLimit > 0) state.availableTokens -= tokenCost;
-                if (requestLimit > 0) state.availableRequests -= requestCost;
-                state.lastLlmRequestAt = Date.now();
-                return { reservedTokens: tokenCost };
-            }
-
-            const tokenWait = tokenLimit > 0 && !tokenReady
-                ? ((tokenCost - state.availableTokens) / tokenLimit) * RATE_WINDOW_MS
-                : 0;
-            const requestWait = requestLimit > 0 && !requestReady
-                ? ((requestCost - state.availableRequests) / requestLimit) * RATE_WINDOW_MS
-                : 0;
-            const waitMs = Math.ceil(Math.max(tokenWait, requestWait, intervalWait, 250));
-
-            logger.warn(`LLM rate guard waiting ${Math.ceil(waitMs / 1000)}s for ${model}; estimated=${estimatedTokens}, reserved=${tokenCost} tokens.`);
-            await sleep(waitMs);
+        if (tokenReady && requestReady && intervalReady) {
+            if (tokenLimit > 0) state.availableTokens -= tokenCost;
+            if (requestLimit > 0) state.availableRequests -= requestCost;
+            state.lastLlmRequestAt = Date.now();
+            return { reservedTokens: tokenCost };
         }
-    };
 
-    const queued = state.queue.then(reserve, reserve);
-    state.queue = queued.catch(() => {});
-    return queued;
+        const tokenWait = tokenLimit > 0 && !tokenReady
+            ? ((tokenCost - state.availableTokens) / tokenLimit) * RATE_WINDOW_MS
+            : 0;
+        const requestWait = requestLimit > 0 && !requestReady
+            ? ((requestCost - state.availableRequests) / requestLimit) * RATE_WINDOW_MS
+            : 0;
+        const waitMs = Math.ceil(Math.max(tokenWait, requestWait, intervalWait, 250));
+
+        logger.warn(`LLM rate guard async wait ${Math.ceil(waitMs / 1000)}s for ${model}; estimated=${estimatedTokens}, reserved=${tokenCost} tokens.`);
+        await sleep(waitMs);
+    }
 }
 
 function reconcileActualUsage({
