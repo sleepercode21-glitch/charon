@@ -6,11 +6,52 @@ const {
     plannerStageSystemPrompt,
 } = require('../agents/workflows/schedulingGraph');
 const {
+    CHARON_PROMPTS,
+    CHARON_RESPONSE_PROMPT,
     PLANNER_DRAFT_PROMPT,
     PLANNER_REPAIR_PROMPT,
     PLANNER_FINAL_PROMPT,
     PLANNER_STAGE_PROMPTS,
-} = require('../models/prompts/plannerPrompts');
+} = require('../models/prompts');
+const path = require('node:path');
+const fs = require('node:fs');
+
+test('registers exactly four production prompts', () => {
+    assert.deepEqual(Object.keys(CHARON_PROMPTS), [
+        'plannerDraft',
+        'plannerRepair',
+        'plannerFinal',
+        'response',
+    ]);
+    assert.equal(CHARON_PROMPTS.plannerDraft, PLANNER_DRAFT_PROMPT);
+    assert.equal(CHARON_PROMPTS.plannerRepair, PLANNER_REPAIR_PROMPT);
+    assert.equal(CHARON_PROMPTS.plannerFinal, PLANNER_FINAL_PROMPT);
+    assert.equal(CHARON_PROMPTS.response, CHARON_RESPONSE_PROMPT);
+});
+
+test('keeps each production prompt around the 400-500 token budget', () => {
+    for (const [name, prompt] of Object.entries(CHARON_PROMPTS)) {
+        const estimatedTokens = Math.ceil(prompt.length / 4);
+        assert.ok(
+            estimatedTokens >= 400 && estimatedTokens <= 500,
+            `${name} prompt estimated ${estimatedTokens} tokens`,
+        );
+    }
+});
+
+test('stores the four production prompts in four physical prompt files', () => {
+    const promptDir = path.join(__dirname, '..', 'models', 'prompts');
+    const promptFiles = fs.readdirSync(promptDir)
+        .filter((file) => /^(plannerDraftPrompt|plannerRepairPrompt|plannerFinalPrompt|responsePrompt)\.js$/.test(file))
+        .sort();
+
+    assert.deepEqual(promptFiles, [
+        'plannerDraftPrompt.js',
+        'plannerFinalPrompt.js',
+        'plannerRepairPrompt.js',
+        'responsePrompt.js',
+    ]);
+});
 
 test('uses three dedicated planner prompts instead of one extended prompt', () => {
     assert.equal(PLANNER_STAGE_PROMPTS.length, 3);

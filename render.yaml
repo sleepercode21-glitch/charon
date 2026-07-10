@@ -13,15 +13,13 @@ services:
         value: production
       - key: MONGODB_URI
         sync: false
-      - key: GROQ_API_KEY
+      - key: GROQ_PLANNER_API_KEY_1
         sync: false
-      - key: GROQ_PLANNER_API_KEY
+      - key: GROQ_PLANNER_API_KEY_2
         sync: false
-      - key: GROQ_PLANNER_API_KEYS
+      - key: GROQ_PLANNER_API_KEY_3
         sync: false
       - key: GROQ_RESPONSE_API_KEY
-        sync: false
-      - key: GROQ_RESPONSE_API_KEYS
         sync: false
       - key: GROQ_PLANNER_MODEL
         value: llama-3.1-8b-instant

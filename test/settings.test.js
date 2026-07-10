@@ -59,23 +59,27 @@ test('uses independent planner and response Groq keys when configured', () => {
     }), {
         planner: 'planner-test-key',
         response: 'response-test-key',
-        plannerKeys: ['planner-test-key', 'shared-test-key'],
-        responseKeys: ['response-test-key', 'shared-test-key'],
+        plannerKeys: ['planner-test-key'],
+        responseKeys: ['response-test-key'],
     });
 });
 
-test('uses comma-separated Groq key pools before single-key fallbacks', () => {
+test('uses three planner keys and one response key when pools are configured', () => {
     assert.deepEqual(loadKeySelection({
         GROQ_API_KEY: 'shared-test-key',
         GROQ_PLANNER_API_KEY: 'planner-single-key',
         GROQ_RESPONSE_API_KEY: 'response-single-key',
-        GROQ_PLANNER_API_KEYS: 'planner-pool-1,planner-pool-2',
-        GROQ_RESPONSE_API_KEYS: 'response-pool-1 response-pool-2',
+        GROQ_PLANNER_API_KEY_1: 'planner-pool-1',
+        GROQ_PLANNER_API_KEY_2: 'planner-pool-2',
+        GROQ_PLANNER_API_KEY_3: 'planner-pool-3',
+        GROQ_PLANNER_API_KEY_4: 'planner-pool-4',
+        GROQ_RESPONSE_API_KEY_1: 'response-pool-1',
+        GROQ_RESPONSE_API_KEY_2: 'response-pool-2',
     }), {
         planner: 'planner-pool-1',
-        response: 'response-pool-1',
-        plannerKeys: ['planner-pool-1', 'planner-pool-2', 'planner-single-key', 'shared-test-key'],
-        responseKeys: ['response-pool-1', 'response-pool-2', 'response-single-key', 'shared-test-key'],
+        response: 'response-single-key',
+        plannerKeys: ['planner-pool-1', 'planner-pool-2', 'planner-pool-3'],
+        responseKeys: ['response-single-key'],
     });
 });
 

@@ -59,12 +59,29 @@ function splitSecretList(value) {
         .filter(Boolean);
 }
 
-function secretListFromEnv(names) {
+function indexedSecretListFromEnv(prefix, limit = 12) {
     const values = [];
-    for (const name of names) {
-        values.push(...splitSecretList(process.env[name]));
+    for (let index = 1; index <= limit; index += 1) {
+        values.push(...splitSecretList(process.env[`${prefix}_${index}`]));
     }
-    return [...new Set(values)];
+    return values;
+}
+
+function uniqueSecrets(values) {
+    return [...new Set(values.filter(Boolean))];
+}
+
+function firstConfiguredSecretList(...lists) {
+    for (const list of lists) {
+        const values = uniqueSecrets(list);
+        if (values.length > 0) return values;
+    }
+    return [];
+}
+
+function firstConfiguredSecret(...lists) {
+    const values = firstConfiguredSecretList(...lists);
+    return values.length > 0 ? [values[0]] : [];
 }
 
 function csvNumbersFromEnv(name, fallback) {
@@ -76,18 +93,18 @@ function csvNumbersFromEnv(name, fallback) {
     return values.length > 0 ? values : fallback;
 }
 
-const plannerApiKeys = secretListFromEnv([
-    'GROQ_PLANNER_API_KEYS',
-    'GROQ_PLANNER_API_KEY',
-    'GROQ_API_KEYS',
-    'GROQ_API_KEY',
-]);
-const responseApiKeys = secretListFromEnv([
-    'GROQ_RESPONSE_API_KEYS',
-    'GROQ_RESPONSE_API_KEY',
-    'GROQ_API_KEYS',
-    'GROQ_API_KEY',
-]);
+const plannerApiKeys = firstConfiguredSecretList(
+    indexedSecretListFromEnv('GROQ_PLANNER_API_KEY', 3),
+    splitSecretList(process.env.GROQ_PLANNER_API_KEY),
+    splitSecretList(process.env.GROQ_API_KEY),
+    indexedSecretListFromEnv('GROQ_API_KEY', 3),
+);
+const responseApiKeys = firstConfiguredSecret(
+    splitSecretList(process.env.GROQ_RESPONSE_API_KEY),
+    indexedSecretListFromEnv('GROQ_RESPONSE_API_KEY', 1),
+    splitSecretList(process.env.GROQ_API_KEY),
+    indexedSecretListFromEnv('GROQ_API_KEY', 1),
+);
 
 const settings = {
     appName: 'charon',

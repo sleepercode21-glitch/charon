@@ -417,8 +417,8 @@ function createLlmModel(modelOverride = null, purpose = 'response', options = {}
     const apiKeys = rotateKeys(configuredApiKeys, options.keyOffset || 0);
     if (!apiKeys?.length) {
         const variable = purpose === 'planner'
-            ? 'GROQ_PLANNER_API_KEYS / GROQ_PLANNER_API_KEY (or GROQ_API_KEYS / GROQ_API_KEY)'
-            : 'GROQ_RESPONSE_API_KEYS / GROQ_RESPONSE_API_KEY (or GROQ_API_KEYS / GROQ_API_KEY)';
+            ? 'GROQ_PLANNER_API_KEY_1 through GROQ_PLANNER_API_KEY_3'
+            : 'GROQ_RESPONSE_API_KEY';
         throw new Error(`${variable} is required for the Groq ${purpose} model.`);
     }
 
