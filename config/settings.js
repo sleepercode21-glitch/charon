@@ -1,8 +1,55 @@
 const path = require('path');
 
-function numberFromEnv(name, fallback) {
+const DEFAULT_GROQ_MODEL = 'llama-3.1-8b-instant';
+const DEPRECATED_GROQ_MODELS = new Set([
+    'groq/compound',
+    'qwen/qwen3-32b',
+]);
+
+const DEPRECATED_COMPOUND_ENV_VALUES = {
+    LLM_MAX_CALL_INPUT_TOKENS: [10000, 24000],
+    LLM_PLANNER_MAX_INPUT_TOKENS: [2000],
+    LLM_PLANNER_RETRY_INPUT_TOKENS: [1900],
+    LLM_PLANNER_TOKEN_ESTIMATE_MULTIPLIER: [2.5],
+    LLM_PLANNER_MIN_REQUEST_TOKENS: [6500],
+    LLM_PLANNER_MIN_REQUEST_INTERVAL_MS: [20000],
+    LLM_RESPONSE_MAX_OUTPUT_TOKENS: [220, 1024],
+    LLM_CONTEXT_TOKEN_BUDGET: [6000],
+    LLM_MAX_CONTEXT_MESSAGES: [30],
+    LLM_TOKENS_PER_MINUTE: [5200],
+    LLM_REQUESTS_PER_MINUTE: [25],
+    LLM_PLANNER_TOKENS_PER_MINUTE: [30000],
+    LLM_PLANNER_REQUESTS_PER_MINUTE: [3],
+    LLM_RATE_SAFETY_MULTIPLIER: [1.35],
+    LLM_MIN_REQUEST_INTERVAL_MS: [1750],
+};
+
+function isDeprecatedGroqModel(model) {
+    return DEPRECATED_GROQ_MODELS.has(String(model || '').trim());
+}
+
+function groqModelFromEnv(name, fallback = DEFAULT_GROQ_MODEL) {
+    const value = String(process.env[name] || '').trim();
+    if (!value || isDeprecatedGroqModel(value)) return fallback;
+    return value;
+}
+
+const staleCompoundModelEnv = isDeprecatedGroqModel(process.env.GROQ_PLANNER_MODEL)
+    || isDeprecatedGroqModel(process.env.GROQ_RESPONSE_MODEL);
+
+function numberFromEnv(name, fallback, options = {}) {
     const value = Number(process.env[name]);
+    if (options.ignoreDeprecatedCompoundValue && Number.isFinite(value)) {
+        const deprecatedValues = DEPRECATED_COMPOUND_ENV_VALUES[name] || [];
+        if (deprecatedValues.includes(value)) return fallback;
+    }
     return Number.isFinite(value) ? value : fallback;
+}
+
+function llamaNumberFromEnv(name, fallback) {
+    return numberFromEnv(name, fallback, {
+        ignoreDeprecatedCompoundValue: staleCompoundModelEnv,
+    });
 }
 
 function csvNumbersFromEnv(name, fallback) {
@@ -28,34 +75,34 @@ const settings = {
     },
     llm: {
         provider: 'groq',
-        plannerModel: process.env.GROQ_PLANNER_MODEL || 'llama-3.1-8b-instant',
-        responseModel: process.env.GROQ_RESPONSE_MODEL || 'llama-3.1-8b-instant',
+        plannerModel: groqModelFromEnv('GROQ_PLANNER_MODEL'),
+        responseModel: groqModelFromEnv('GROQ_RESPONSE_MODEL'),
         plannerApiKey: process.env.GROQ_PLANNER_API_KEY || process.env.GROQ_API_KEY,
         responseApiKey: process.env.GROQ_RESPONSE_API_KEY || process.env.GROQ_API_KEY,
         temperature: numberFromEnv('LLM_TEMPERATURE', 0.1),
         maxOutputTokens: numberFromEnv('LLM_MAX_OUTPUT_TOKENS', 384),
-        maxCallInputTokens: numberFromEnv('LLM_MAX_CALL_INPUT_TOKENS', 60000),
-        plannerMaxInputTokens: numberFromEnv('LLM_PLANNER_MAX_INPUT_TOKENS', 3500),
-        plannerRetryInputTokens: numberFromEnv('LLM_PLANNER_RETRY_INPUT_TOKENS', 2500),
-        plannerTokenEstimateMultiplier: numberFromEnv('LLM_PLANNER_TOKEN_ESTIMATE_MULTIPLIER', 1.2),
-        plannerMinRequestTokens: numberFromEnv('LLM_PLANNER_MIN_REQUEST_TOKENS', 0),
-        plannerMinRequestIntervalMs: numberFromEnv('LLM_PLANNER_MIN_REQUEST_INTERVAL_MS', 500),
+        maxCallInputTokens: llamaNumberFromEnv('LLM_MAX_CALL_INPUT_TOKENS', 60000),
+        plannerMaxInputTokens: llamaNumberFromEnv('LLM_PLANNER_MAX_INPUT_TOKENS', 3500),
+        plannerRetryInputTokens: llamaNumberFromEnv('LLM_PLANNER_RETRY_INPUT_TOKENS', 2500),
+        plannerTokenEstimateMultiplier: llamaNumberFromEnv('LLM_PLANNER_TOKEN_ESTIMATE_MULTIPLIER', 1.2),
+        plannerMinRequestTokens: llamaNumberFromEnv('LLM_PLANNER_MIN_REQUEST_TOKENS', 0),
+        plannerMinRequestIntervalMs: llamaNumberFromEnv('LLM_PLANNER_MIN_REQUEST_INTERVAL_MS', 500),
         plannerRateLimitCooldownMs: numberFromEnv('LLM_PLANNER_RATE_LIMIT_COOLDOWN_MS', 60000),
         planMaxOutputTokens: numberFromEnv('LLM_PLAN_MAX_OUTPUT_TOKENS', 800),
-        responseMaxOutputTokens: numberFromEnv('LLM_RESPONSE_MAX_OUTPUT_TOKENS', 384),
+        responseMaxOutputTokens: llamaNumberFromEnv('LLM_RESPONSE_MAX_OUTPUT_TOKENS', 384),
         maxSequenceActions: Math.max(0, Math.floor(numberFromEnv('LLM_MAX_SEQUENCE_ACTIONS', 0))),
         sequenceResponseMaxSteps: Math.max(0, Math.floor(numberFromEnv('LLM_SEQUENCE_RESPONSE_MAX_STEPS', 12))),
         maxInputTokens: numberFromEnv('LLM_MAX_INPUT_TOKENS', 10000),
-        contextTokenBudget: numberFromEnv('LLM_CONTEXT_TOKEN_BUDGET', 3000),
+        contextTokenBudget: llamaNumberFromEnv('LLM_CONTEXT_TOKEN_BUDGET', 3000),
         responseContextTokenBudget: numberFromEnv('LLM_RESPONSE_CONTEXT_TOKEN_BUDGET', 1200),
-        maxContextMessages: numberFromEnv('LLM_MAX_CONTEXT_MESSAGES', 20),
+        maxContextMessages: llamaNumberFromEnv('LLM_MAX_CONTEXT_MESSAGES', 20),
         maxContextPolls: numberFromEnv('LLM_MAX_CONTEXT_POLLS', 8),
-        tokensPerMinute: numberFromEnv('LLM_TOKENS_PER_MINUTE', 200000),
-        requestsPerMinute: numberFromEnv('LLM_REQUESTS_PER_MINUTE', 120),
-        plannerTokensPerMinute: numberFromEnv('LLM_PLANNER_TOKENS_PER_MINUTE', 200000),
-        plannerRequestsPerMinute: numberFromEnv('LLM_PLANNER_REQUESTS_PER_MINUTE', 120),
-        rateSafetyMultiplier: numberFromEnv('LLM_RATE_SAFETY_MULTIPLIER', 1.15),
-        minRequestIntervalMs: numberFromEnv('LLM_MIN_REQUEST_INTERVAL_MS', 500),
+        tokensPerMinute: llamaNumberFromEnv('LLM_TOKENS_PER_MINUTE', 200000),
+        requestsPerMinute: llamaNumberFromEnv('LLM_REQUESTS_PER_MINUTE', 120),
+        plannerTokensPerMinute: llamaNumberFromEnv('LLM_PLANNER_TOKENS_PER_MINUTE', 200000),
+        plannerRequestsPerMinute: llamaNumberFromEnv('LLM_PLANNER_REQUESTS_PER_MINUTE', 120),
+        rateSafetyMultiplier: llamaNumberFromEnv('LLM_RATE_SAFETY_MULTIPLIER', 1.15),
+        minRequestIntervalMs: llamaNumberFromEnv('LLM_MIN_REQUEST_INTERVAL_MS', 500),
         rateStartFull: process.env.LLM_RATE_START_FULL === 'true',
     },
     sessions: {

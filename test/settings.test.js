@@ -23,6 +23,21 @@ function loadKeySelection(env) {
     return JSON.parse(output);
 }
 
+function loadLlmSettings(env) {
+    const script = `
+        const { settings } = require(${JSON.stringify(settingsPath)});
+        process.stdout.write(JSON.stringify(settings.llm));
+    `;
+    const output = execFileSync(process.execPath, ['-e', script], {
+        env: {
+            PATH: process.env.PATH,
+            ...env,
+        },
+        encoding: 'utf8',
+    });
+    return JSON.parse(output);
+}
+
 test('uses the shared Groq key as a backward-compatible fallback', () => {
     assert.deepEqual(loadKeySelection({
         GROQ_API_KEY: 'shared-test-key',
@@ -41,4 +56,44 @@ test('uses independent planner and response Groq keys when configured', () => {
         planner: 'planner-test-key',
         response: 'response-test-key',
     });
+});
+
+test('coerces stale Compound/Qwen env overrides to Llama instant defaults', () => {
+    const llm = loadLlmSettings({
+        GROQ_PLANNER_MODEL: 'groq/compound',
+        GROQ_RESPONSE_MODEL: 'qwen/qwen3-32b',
+        LLM_MAX_CALL_INPUT_TOKENS: '24000',
+        LLM_PLANNER_MAX_INPUT_TOKENS: '2000',
+        LLM_PLANNER_RETRY_INPUT_TOKENS: '1900',
+        LLM_PLANNER_TOKEN_ESTIMATE_MULTIPLIER: '2.5',
+        LLM_PLANNER_MIN_REQUEST_TOKENS: '6500',
+        LLM_PLANNER_MIN_REQUEST_INTERVAL_MS: '20000',
+        LLM_RESPONSE_MAX_OUTPUT_TOKENS: '1024',
+        LLM_CONTEXT_TOKEN_BUDGET: '6000',
+        LLM_MAX_CONTEXT_MESSAGES: '30',
+        LLM_TOKENS_PER_MINUTE: '5200',
+        LLM_REQUESTS_PER_MINUTE: '25',
+        LLM_PLANNER_TOKENS_PER_MINUTE: '30000',
+        LLM_PLANNER_REQUESTS_PER_MINUTE: '3',
+        LLM_RATE_SAFETY_MULTIPLIER: '1.35',
+        LLM_MIN_REQUEST_INTERVAL_MS: '1750',
+    });
+
+    assert.equal(llm.plannerModel, 'llama-3.1-8b-instant');
+    assert.equal(llm.responseModel, 'llama-3.1-8b-instant');
+    assert.equal(llm.maxCallInputTokens, 60000);
+    assert.equal(llm.plannerMaxInputTokens, 3500);
+    assert.equal(llm.plannerRetryInputTokens, 2500);
+    assert.equal(llm.plannerTokenEstimateMultiplier, 1.2);
+    assert.equal(llm.plannerMinRequestTokens, 0);
+    assert.equal(llm.plannerMinRequestIntervalMs, 500);
+    assert.equal(llm.responseMaxOutputTokens, 384);
+    assert.equal(llm.contextTokenBudget, 3000);
+    assert.equal(llm.maxContextMessages, 20);
+    assert.equal(llm.tokensPerMinute, 200000);
+    assert.equal(llm.requestsPerMinute, 120);
+    assert.equal(llm.plannerTokensPerMinute, 200000);
+    assert.equal(llm.plannerRequestsPerMinute, 120);
+    assert.equal(llm.rateSafetyMultiplier, 1.15);
+    assert.equal(llm.minRequestIntervalMs, 500);
 });
