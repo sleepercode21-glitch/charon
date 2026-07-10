@@ -192,9 +192,9 @@ GROQ_PLANNER_API_KEY_2=
 GROQ_PLANNER_API_KEY_3=
 LLM_MAX_OUTPUT_TOKENS=384
 LLM_MAX_CALL_INPUT_TOKENS=60000
-LLM_PLANNER_MAX_INPUT_TOKENS=3500
-LLM_PLANNER_RETRY_INPUT_TOKENS=2500
-LLM_PLANNER_TOKEN_ESTIMATE_MULTIPLIER=1.2
+LLM_PLANNER_MAX_INPUT_TOKENS=5000
+LLM_PLANNER_RETRY_INPUT_TOKENS=3200
+LLM_PLANNER_TOKEN_ESTIMATE_MULTIPLIER=1.35
 LLM_PLANNER_MIN_REQUEST_TOKENS=0
 LLM_PLANNER_MIN_REQUEST_INTERVAL_MS=500
 LLM_PLANNER_RATE_LIMIT_COOLDOWN_MS=60000
@@ -204,19 +204,19 @@ LLM_RESPONSE_MAX_OUTPUT_TOKENS=384
 LLM_MAX_SEQUENCE_ACTIONS=0
 LLM_SEQUENCE_RESPONSE_MAX_STEPS=12
 LLM_MAX_INPUT_TOKENS=10000
-LLM_CONTEXT_TOKEN_BUDGET=3000
+LLM_CONTEXT_TOKEN_BUDGET=4500
 LLM_RESPONSE_CONTEXT_TOKEN_BUDGET=1200
-LLM_MAX_CONTEXT_MESSAGES=20
-LLM_MAX_CONTEXT_POLLS=8
-LLM_TOKENS_PER_MINUTE=200000
-LLM_REQUESTS_PER_MINUTE=120
-LLM_PLANNER_TOKENS_PER_MINUTE=200000
-LLM_PLANNER_REQUESTS_PER_MINUTE=120
+LLM_MAX_CONTEXT_MESSAGES=24
+LLM_MAX_CONTEXT_POLLS=10
+LLM_TOKENS_PER_MINUTE=30000
+LLM_REQUESTS_PER_MINUTE=30
+LLM_PLANNER_TOKENS_PER_MINUTE=30000
+LLM_PLANNER_REQUESTS_PER_MINUTE=30
 LLM_RATE_SAFETY_MULTIPLIER=1.15
 LLM_MIN_REQUEST_INTERVAL_MS=500
 ```
 
-Natural-language mode uses four production prompt files registered in `models/prompts/index.js`: `plannerDraftPrompt.js`, `plannerRepairPrompt.js`, `plannerFinalPrompt.js`, and `responsePrompt.js`. By default `LLM_PLANNER_STAGES=3` runs draft planner → critic/repair planner → finalizer planner. Each stage has a different prompt file and payload shape, and each stage feeds its output into the next. Stage 1 prefers planner key 1, stage 2 prefers planner key 2, and stage 3 prefers planner key 3; every stage can still rotate through fallback keys on 429/503/auth failure. `llama-3.1-8b-instant` receives the tagged message, quote, bot clock, pending clarification, recent messages, polls, and active database summaries, then returns one action or an ordered finite sequence. `LLM_MAX_SEQUENCE_ACTIONS=0` removes the application-level step cap; setting it above zero restores a deployment-specific limit. The actual sequence must still fit in the planner model's finite JSON output.
+Natural-language mode uses four production prompt files registered in `models/prompts/index.js`: `plannerDraftPrompt.js`, `plannerRepairPrompt.js`, `plannerFinalPrompt.js`, and `responsePrompt.js`. By default `LLM_PLANNER_STAGES=3` runs intent/context analysis → executable plan builder → finalizer planner. Stage 1 identifies the user’s intent, ordered operations, missing details, time facts, and referenced context such as quotes, polls, active reminders, active meetings, and recent messages. Stage 2 receives that analysis plus the full room evidence and builds one action or an ordered finite sequence. Stage 3 validates the plan against the original evidence before tools run. Each stage has a different prompt file and payload shape, and each stage feeds its output into the next. Stage 1 prefers planner key 1, stage 2 prefers planner key 2, and stage 3 prefers planner key 3; every stage can still rotate through fallback keys on 429/503/auth failure. `LLM_MAX_SEQUENCE_ACTIONS=0` removes the application-level step cap; setting it above zero restores a deployment-specific limit. The actual sequence must still fit in the planner model's finite JSON output.
 
 Charon preflights the whole sequence, executes steps in order, and can pass nested results such as an earlier Meet link, public id, or listed item into later steps. After local tools run, `llama-3.1-8b-instant` normally writes one truthful response. Sequences longer than `LLM_SEQUENCE_RESPONSE_MAX_STEPS` use the deterministic response writer, avoiding another model call. Command mode uses no LLM calls.
 
@@ -228,10 +228,12 @@ signals are retained.
 
 The Llama instant path is direct model inference rather than Compound's hidden underlying-model routing,
 so the local token accounting is much less inflated. Planner and response calls have separate credentials
-and separate local buckets even when they use the same model ID. The defaults target the current Groq
-developer-plan `llama-3.1-8b-instant` budget with a safety margin; if Groq still returns 429 because
-another process or project consumed the shared organization quota, Charon marks the local bucket empty,
-waits one provider window, and retries once.
+and separate local buckets even when they use the same model ID. The defaults assume the practical Groq
+`llama-3.1-8b-instant` bucket is about 30k TPM, not the larger headline context number. The planner gets
+a richer 5k-token first pass and a 3.2k-token lean retry, with a conservative estimate multiplier so local
+throttling starts before Groq rejects the request. If Groq still returns 429 because another process or
+project consumed the shared organization quota, Charon marks the local bucket empty, waits one provider
+window, and retries once.
 
 ### Google Meet
 

@@ -2,13 +2,14 @@ const { ACTION_SCHEMA } = require('./actionSchema');
 
 const PLANNER_FINAL_PROMPT = `
 You are Charon planner stage 3: FINALIZER.
-You receive the original planner payload, draft output, and repair output. Produce the final plan JSON
-that local tools can execute. This is the only output that matters.
+You receive the original payload, stage 1 intent/context analysis, and stage 2 executable plan.
+Return the final tool plan JSON. This is the only output that will run.
 
 Finalization rules:
-- Choose the safest executable plan supported by original evidence and prior planner outputs.
+- Choose the safest executable plan supported by original evidence, references, and stage 2.
 - Prefer original payload evidence over model guesses.
-- Prefer stage 2 repair over stage 1 when they differ, unless stage 2 dropped required user intent.
+- Apply context priority: current msg, quote, pending ask, active records, poll leaders, recent chat, signals.
+- Prefer stage 1 intent order when stage 2 drops, duplicates, or misorders requested operations.
 - Keep every requested sequence step once, in order.
 - Validate every action against the schema; fill unused fields with "" or [].
 - Remove extra keys, nested objects, commentary, analysis, and placeholders.

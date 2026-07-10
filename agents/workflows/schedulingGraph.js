@@ -700,6 +700,70 @@ function naturalTimeEvidence(value, fallbackTimezone, referenceDate = new Date()
     };
 }
 
+function relativeTimePattern() {
+    return /\b(?:(?:in|after)\s+\d+\s*(?:m|mins?|minutes?|h|hrs?|hours?|d|days?)|\d+\s*(?:m|mins?|minutes?|h|hrs?|hours?|d|days?)\s+from\s+now)\b/i;
+}
+
+function stripBotMentions(value) {
+    return String(value || '')
+        .replace(/@\S+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function reminderTextFromRelativeRequest(value) {
+    const text = stripBotMentions(value);
+    if (!/\bremind(?:er)?\b/i.test(text) || !relativeTimePattern().test(text)) return '';
+
+    let reminderText = text
+        .replace(/^.*?\bremind(?:er)?\s*(?:me|us|everyone|everybody|all|the\s+group)?\b/i, ' ')
+        .replace(relativeTimePattern(), ' ')
+        .replace(/^(?:to|that|about|for)\s+/i, ' ')
+        .replace(/\s+(?:to|that|about|for)\s+$/i, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    if (!reminderText) {
+        const trailing = text.match(new RegExp(`${relativeTimePattern().source}\\s+(?:to|that|about|for)?\\s*([\\s\\S]+)$`, 'i'));
+        reminderText = trailing?.[1] || '';
+    }
+
+    return reminderText
+        .replace(/^(?:to|that|about|for)\s+/i, '')
+        .replace(/[.!?\s]+$/g, '')
+        .trim();
+}
+
+function simpleRelativeReminderPlan(value, timezone = settings.timezone, referenceDate = new Date()) {
+    const body = stripBotMentions(value);
+    if (!/\bremind(?:er)?\b/i.test(body)) return null;
+
+    const time = exactRelativeTimeEvidence(body, timezone, referenceDate);
+    if (!time) return null;
+
+    const text = reminderTextFromRelativeRequest(body);
+    if (!text) {
+        return {
+            intent: 'reminder',
+            text: '',
+            date: time.date,
+            time: '',
+            timezone: time.timezone,
+            ask: 'What should I remind the group about?',
+            source: 'deterministic_relative_reminder',
+        };
+    }
+
+    return {
+        intent: 'reminder',
+        text,
+        date: time.date,
+        time: '',
+        timezone: time.timezone,
+        source: 'deterministic_relative_reminder',
+    };
+}
+
 function pollOptionsWithVotes(input, context) {
     const options = [];
     const addOption = (name, votes = 0) => {
@@ -885,30 +949,119 @@ function plannerStageSystemPrompt(stage, totalStages) {
     return PLANNER_STAGE_PROMPTS[1];
 }
 
+function plannerActionSnapshot(action) {
+    if (!action || typeof action !== 'object') return null;
+    return {
+        intent: String(action.intent || ''),
+        title: String(action.title || ''),
+        text: String(action.text || ''),
+        target: String(action.target || ''),
+        date: String(action.date || ''),
+        time: String(action.time || ''),
+        timezone: String(action.timezone || ''),
+        kind: String(action.kind || ''),
+        attendees: Array.isArray(action.attendees) ? action.attendees.filter(Boolean).slice(0, 8) : [],
+        reply: String(action.reply || ''),
+        ask: String(action.ask || ''),
+    };
+}
+
+function plannerIntentContextSnapshot(value) {
+    if (!value || typeof value !== 'object') return null;
+    if (value.stage !== 'intent_context' && !value.primaryIntent && !Array.isArray(value.actionsNeeded)) return null;
+    return {
+        stage: 'intent_context',
+        primaryIntent: String(value.primaryIntent || ''),
+        actionsNeeded: Array.isArray(value.actionsNeeded)
+            ? value.actionsNeeded.map((item) => String(item || '')).filter(Boolean).slice(0, 20)
+            : [],
+        references: Array.isArray(value.references)
+            ? value.references.slice(0, 20).map((reference) => ({
+                phrase: String(reference?.phrase || ''),
+                type: String(reference?.type || ''),
+                evidence: trimText(reference?.evidence || '', 180),
+            }))
+            : [],
+        missing: Array.isArray(value.missing)
+            ? value.missing.map((item) => String(item || '')).filter(Boolean).slice(0, 10)
+            : [],
+        timeFacts: Array.isArray(value.timeFacts)
+            ? value.timeFacts.slice(0, 12).map((fact) => ({
+                text: String(fact?.text || ''),
+                resolvedUtc: String(fact?.resolvedUtc || ''),
+                timezone: String(fact?.timezone || ''),
+                source: String(fact?.source || ''),
+            }))
+            : [],
+        notes: trimText(value.notes || '', 240),
+    };
+}
+
+function plannerOutputSnapshot(output) {
+    const parsed = safeJson(output);
+    const candidate = parsed?.plan || parsed?.final || parsed;
+    if (!candidate || typeof candidate !== 'object') return null;
+    const intentContext = plannerIntentContextSnapshot(candidate);
+    if (intentContext) return intentContext;
+    if (Array.isArray(candidate.actions)) {
+        return {
+            actions: candidate.actions
+                .map(plannerActionSnapshot)
+                .filter(Boolean),
+        };
+    }
+    return plannerActionSnapshot(candidate);
+}
+
+function executablePlannerSnapshot(output) {
+    const snapshot = plannerOutputSnapshot(output);
+    if (!snapshot || snapshot.stage === 'intent_context') return null;
+    if (Array.isArray(snapshot.actions)) return snapshot.actions.length ? snapshot : null;
+    return snapshot.intent ? snapshot : null;
+}
+
+function plannerReferenceContext(originalPayload) {
+    const roomContext = originalPayload?.roomContext || {};
+    const signals = roomContext.signals || {};
+    return {
+        clock: originalPayload?.clock || null,
+        msg: originalPayload?.msg || '',
+        quoted: originalPayload?.quoted || null,
+        pending: originalPayload?.pending || null,
+        signals,
+        polls: (roomContext.polls || []).slice(0, 6),
+        recentMessages: (roomContext.msgs || []).slice(-12),
+        activeMeetings: (roomContext.meetings || []).slice(0, 12),
+        activeReminders: (roomContext.reminders || []).slice(0, 12),
+    };
+}
+
 function plannerStagePayload(basePayload, previousOutputs = [], stage = 1, totalStages = 1) {
     if (stage <= 1 || previousOutputs.length === 0) return basePayload;
     const originalPayload = JSON.parse(basePayload);
     const prior = previousOutputs.map((output, index) => ({
         stage: index + 1,
-        raw: String(output || '').slice(0, 6000),
-        parsed: safeJson(output),
+        raw: String(output || '').slice(0, 1200),
+        parsed: plannerOutputSnapshot(output),
     }));
     if (stage === totalStages) {
         return JSON.stringify({
             stage: 'finalizer',
-            job: 'Choose final executable plan JSON from original evidence, draft, and repair.',
+            job: 'Validate and finalize the executable plan from original evidence, intent context, and draft plan.',
             originalPayload,
-            draftOutput: prior[0] || null,
-            repairOutput: prior[prior.length - 1] || null,
+            referenceContext: plannerReferenceContext(originalPayload),
+            intentContext: prior[0]?.parsed || null,
+            draftPlan: prior[prior.length - 1] || null,
             allPreviousOutputs: prior,
         });
     }
 
     return JSON.stringify({
-        stage: 'critic_repair',
-        job: 'Audit draft against original evidence and return corrected executable plan JSON.',
+        stage: 'plan_builder',
+        job: 'Build executable ACTION JSON from original evidence plus stage 1 intent/context analysis.',
         originalPayload,
-        draftOutput: prior[0] || null,
+        referenceContext: plannerReferenceContext(originalPayload),
+        intentContext: prior[0]?.parsed || null,
         previousPlannerOutputs: prior,
     });
 }
@@ -941,13 +1094,23 @@ async function invokePlannerChain({
         const payload = plannerStagePayload(built.payload, outputs, stage, totalStages);
         finalEstimatedTokens = estimateTokens(systemPrompt) + estimateTokens(payload);
         logger.info(`Planner stage ${stage}/${totalStages} keySlot=${stage} estimated=${finalEstimatedTokens}.`);
-        response = await plannerModels[stage - 1].invoke([
-            new SystemMessage(systemPrompt),
-            new HumanMessage(payload),
-        ], { json: true, maxOutputTokens: settings.llm.planMaxOutputTokens });
-        logModelUsage(`Planner stage ${stage}/${totalStages}`, response, finalEstimatedTokens);
-        logJson(`Planner stage ${stage}/${totalStages} raw`, response.content);
-        outputs.push(response.content);
+        try {
+            response = await plannerModels[stage - 1].invoke([
+                new SystemMessage(systemPrompt),
+                new HumanMessage(payload),
+            ], { json: true, maxOutputTokens: settings.llm.planMaxOutputTokens });
+            logModelUsage(`Planner stage ${stage}/${totalStages}`, response, finalEstimatedTokens);
+            logJson(`Planner stage ${stage}/${totalStages} raw`, response.content);
+            outputs.push(response.content);
+        } catch (error) {
+            const previousOutput = outputs[outputs.length - 1];
+            if (stage > 1 && executablePlannerSnapshot(previousOutput)) {
+                logger.warn(`Planner stage ${stage}/${totalStages} failed; using prior stage output.`, error);
+                response = { content: previousOutput };
+                break;
+            }
+            throw error;
+        }
     }
 
     return {
@@ -1567,6 +1730,15 @@ function createSchedulingGraph({ messageStore }) {
             logJson('Command plan', commandPlan);
             return stateFromPlan({ state, context, rawPlan: commandPlan });
         }
+        const deterministicReminder = simpleRelativeReminderPlan(
+            body,
+            state.input.timezone || settings.timezone,
+            new Date(),
+        );
+        if (deterministicReminder) {
+            logJson('Deterministic relative reminder plan', deterministicReminder);
+            return stateFromPlan({ state, context, rawPlan: deterministicReminder });
+        }
 
         try {
             const budgets = [...new Set([
@@ -1764,4 +1936,5 @@ module.exports = {
     plannerStageSystemPrompt,
     repairPlanWithEvidence,
     resolvePlanReferences,
+    simpleRelativeReminderPlan,
 };

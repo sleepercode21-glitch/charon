@@ -13,7 +13,8 @@ ACTION schema:
   "reply":"",
   "ask":""
 }
-For workflows return {"actions":[ACTION,ACTION]}. Return valid JSON only.
+For workflows return {"actions":[ACTION,ACTION]}. An ACTION must never contain actions or sequence.
+Return valid JSON only.
 `;
 
 module.exports = { ACTION_SCHEMA };

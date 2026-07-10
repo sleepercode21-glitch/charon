@@ -40,11 +40,11 @@ services:
       - key: LLM_MAX_CALL_INPUT_TOKENS
         value: "60000"
       - key: LLM_PLANNER_MAX_INPUT_TOKENS
-        value: "3500"
+        value: "5000"
       - key: LLM_PLANNER_RETRY_INPUT_TOKENS
-        value: "2500"
+        value: "3200"
       - key: LLM_PLANNER_TOKEN_ESTIMATE_MULTIPLIER
-        value: "1.2"
+        value: "1.35"
       - key: LLM_PLANNER_MIN_REQUEST_TOKENS
         value: "0"
       - key: LLM_PLANNER_MIN_REQUEST_INTERVAL_MS
@@ -54,13 +54,21 @@ services:
       - key: LLM_PLANNER_STAGES
         value: "3"
       - key: LLM_CONTEXT_TOKEN_BUDGET
-        value: "3000"
+        value: "4500"
+      - key: LLM_RESPONSE_CONTEXT_TOKEN_BUDGET
+        value: "1200"
       - key: LLM_MAX_CONTEXT_MESSAGES
-        value: "20"
+        value: "24"
+      - key: LLM_MAX_CONTEXT_POLLS
+        value: "10"
+      - key: LLM_TOKENS_PER_MINUTE
+        value: "30000"
+      - key: LLM_REQUESTS_PER_MINUTE
+        value: "30"
       - key: LLM_PLANNER_TOKENS_PER_MINUTE
-        value: "200000"
+        value: "30000"
       - key: LLM_PLANNER_REQUESTS_PER_MINUTE
-        value: "120"
+        value: "30"
       - key: WHATSAPP_GROUP_SCOPE
         value: all
       - key: WHATSAPP_GROUP_ID

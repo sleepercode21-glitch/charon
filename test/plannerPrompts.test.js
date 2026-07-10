@@ -60,8 +60,8 @@ test('uses three dedicated planner prompts instead of one extended prompt', () =
     assert.equal(plannerStageSystemPrompt(3, 3), PLANNER_FINAL_PROMPT);
     assert.notEqual(PLANNER_DRAFT_PROMPT, PLANNER_REPAIR_PROMPT);
     assert.notEqual(PLANNER_REPAIR_PROMPT, PLANNER_FINAL_PROMPT);
-    assert.match(PLANNER_DRAFT_PROMPT, /stage 1: DRAFT/);
-    assert.match(PLANNER_REPAIR_PROMPT, /stage 2: CRITIC AND REPAIR/);
+    assert.match(PLANNER_DRAFT_PROMPT, /stage 1: INTENT AND CONTEXT/);
+    assert.match(PLANNER_REPAIR_PROMPT, /stage 2: PLAN BUILDER/);
     assert.match(PLANNER_FINAL_PROMPT, /stage 3: FINALIZER/);
 });
 
@@ -70,19 +70,32 @@ test('uses stage-specific planner payload shapes', () => {
         msg: 'schedule the poll winner',
         clock: { timestampMs: 1 },
         quoted: { pollName: 'System design' },
+        roomContext: {
+            signals: { latestPoll: { leader: { opt: 'Youtube', n: 2 } } },
+            polls: [{ name: 'System design', leader: { opt: 'Youtube', n: 2 } }],
+            msgs: [{ body: 'Poll is ready' }],
+            meetings: [{ id: 'abc123', title: 'Old session' }],
+            reminders: [{ id: 'def456', text: 'Prep' }],
+        },
     });
-    const draft = '{"intent":"schedule","title":"System design","date":""}';
-    const repair = '{"intent":"schedule","title":"Youtube System design","date":"2026-07-11T18:00:00Z"}';
+    const intentContext = JSON.stringify({
+        stage: 'intent_context',
+        primaryIntent: 'schedule',
+        actionsNeeded: ['schedule'],
+        references: [{ phrase: 'poll winner', type: 'poll', evidence: 'Youtube leads' }],
+    });
+    const draftPlan = '{"intent":"schedule","title":"Youtube System design","date":"2026-07-11T18:00:00Z"}';
 
     assert.equal(plannerStagePayload(base, [], 1, 3), base);
 
-    const criticPayload = JSON.parse(plannerStagePayload(base, [draft], 2, 3));
-    assert.equal(criticPayload.stage, 'critic_repair');
-    assert.equal(criticPayload.draftOutput.parsed.intent, 'schedule');
-    assert.ok(!Object.hasOwn(criticPayload, 'repairOutput'));
+    const builderPayload = JSON.parse(plannerStagePayload(base, [intentContext], 2, 3));
+    assert.equal(builderPayload.stage, 'plan_builder');
+    assert.equal(builderPayload.intentContext.primaryIntent, 'schedule');
+    assert.equal(builderPayload.referenceContext.polls[0].name, 'System design');
+    assert.ok(!Object.hasOwn(builderPayload, 'draftPlan'));
 
-    const finalPayload = JSON.parse(plannerStagePayload(base, [draft, repair], 3, 3));
+    const finalPayload = JSON.parse(plannerStagePayload(base, [intentContext, draftPlan], 3, 3));
     assert.equal(finalPayload.stage, 'finalizer');
-    assert.equal(finalPayload.draftOutput.parsed.title, 'System design');
-    assert.equal(finalPayload.repairOutput.parsed.title, 'Youtube System design');
+    assert.equal(finalPayload.intentContext.references[0].phrase, 'poll winner');
+    assert.equal(finalPayload.draftPlan.parsed.title, 'Youtube System design');
 });
