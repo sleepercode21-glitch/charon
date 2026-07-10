@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+    deterministicBotReply,
     executePlanSequence,
     normalizePlanActions,
     repairPlanWithEvidence,
@@ -200,6 +201,73 @@ test('executes a long finite workflow without truncating steps', async () => {
     assert.equal(seen.length, 30);
     assert.equal(seen[1], 'Step 2 after Step 1');
     assert.match(seen[29], /^Step 30 after Step 29/);
+});
+
+test('humanizes noisy sequence replies around the final meaningful success', () => {
+    const reply = deterministicBotReply({
+        input: { message: { body: '@bot schedule a Youtube recommendation system design session tomorrow at 9pm CST' } },
+        plan: {},
+        decision: { intent: 'sequence' },
+        actionResult: {
+            status: 'sequence_completed',
+            type: 'sequence',
+            steps: [
+                {
+                    intent: 'cancel',
+                    executed: true,
+                    result: { status: 'nothing_to_cancel', type: 'cancel' },
+                },
+                {
+                    intent: 'schedule',
+                    executed: true,
+                    result: {
+                        status: 'scheduled',
+                        type: 'meeting',
+                        title: 'Youtube recommendation system design session',
+                        id: '9023c6',
+                        when: 'Sat, Jul 11, 9:00 PM CDT',
+                        meetLink: 'https://meet.google.com/zvk-sckh-wcz',
+                    },
+                },
+                {
+                    intent: 'update',
+                    executed: true,
+                    result: {
+                        status: 'updated',
+                        type: 'meeting',
+                        label: 'meeting "Youtube recommendation system design session"',
+                        when: 'Sat, Jul 11, 9:00 PM CDT',
+                    },
+                },
+            ],
+        },
+    });
+
+    assert.equal(reply, 'Updated meeting "Youtube recommendation system design session" to Sat, Jul 11, 9:00 PM CDT.');
+});
+
+test('sequence clarification replies ask naturally without step bookkeeping', () => {
+    const reply = deterministicBotReply({
+        input: { message: { body: '@bot schedule a test system design session tomorrow at 9pm CST' } },
+        plan: {},
+        decision: { intent: 'sequence' },
+        actionResult: {
+            status: 'sequence_partial',
+            type: 'sequence',
+            stoppedAt: 2,
+            steps: [{
+                intent: 'update',
+                executed: false,
+                result: {
+                    status: 'failed',
+                    need: 'clarification',
+                    clarification: 'What should the new title be?',
+                },
+            }],
+        },
+    });
+
+    assert.equal(reply, 'What should the new title be?');
 });
 
 test('repairs schedule time and title from a quoted winning poll', () => {

@@ -1439,6 +1439,7 @@ function responsePayload(state) {
 
     return JSON.stringify({
         clock: currentDateContext(state.input.timezone),
+        originalUserInput: messageText(state.input.message),
         msg: messageText(state.input.message),
         quoted: state.input.quoted || null,
         conversation: JSON.parse(compact.json),
@@ -1499,26 +1500,62 @@ function safeReplyForState(state, reply) {
     return sanitizeReply(`I should not fake that, sir. If you want action, tell me plainly what to schedule, list, cancel, or update. Current ask: ${trimText(body, 120)}`);
 }
 
+function meaningfulSequenceStep(step) {
+    const status = step?.result?.status;
+    return status
+        && !['empty', 'nothing_to_cancel'].includes(status)
+        && status !== 'failed';
+}
+
+function sequenceClarificationStep(steps = []) {
+    return steps.find((step) => (
+        step?.result?.clarification
+        || step?.time?.clarification
+        || step?.plan?.ask
+        || ['meeting_time', 'reminder_time', 'new_time', 'new_meeting_time', 'new_reminder_time'].includes(step?.result?.need)
+    ));
+}
+
+function stateForSequenceStep(state, step) {
+    return {
+        ...state,
+        plan: step?.plan || {},
+        decision: { intent: step?.intent },
+        timeResolution: step?.time || {},
+        actionResult: step?.result || {},
+    };
+}
+
 function deterministicBotReply(state) {
     const result = state.actionResult || {};
     const plan = state.plan || {};
 
     if (result.type === 'sequence') {
-        const replies = (result.steps || []).map((step, index) => {
-            const reply = deterministicBotReply({
-                ...state,
-                plan: step.plan || {},
-                decision: { intent: step.intent },
-                timeResolution: step.time || {},
-                actionResult: step.result || {},
-            });
-            return index === 0 ? reply : reply.replace(/\b,?\s*sir\b/gi, '').replace(/\s+([,.;!?])/g, '$1');
-        });
+        const steps = result.steps || [];
+        const clarification = sequenceClarificationStep(steps);
+        const successes = steps.filter(meaningfulSequenceStep);
 
-        if (result.status === 'sequence_partial') {
-            replies.push(`Stopped at step ${result.stoppedAt || replies.length} because it could not finish.`);
+        if (clarification && successes.length === 0) {
+            return deterministicBotReply(stateForSequenceStep(state, clarification));
         }
-        return replies.filter(Boolean).join('\n');
+
+        const preferred = [...successes].reverse().find((step) => (
+            ['updated', 'scheduled', 'existing'].includes(step?.result?.status)
+        )) || successes[successes.length - 1];
+
+        if (preferred) {
+            const reply = deterministicBotReply(stateForSequenceStep(state, preferred));
+            if (result.status === 'sequence_partial' && clarification) {
+                const ask = deterministicBotReply(stateForSequenceStep(state, clarification))
+                    .replace(/\b,?\s*sir\b/gi, '')
+                    .trim();
+                return `${reply}\n${ask}`;
+            }
+            return reply;
+        }
+
+        if (clarification) return deterministicBotReply(stateForSequenceStep(state, clarification));
+        return 'Done.';
     }
 
     if (state.decision.intent === 'refuse') {
@@ -1530,27 +1567,27 @@ function deterministicBotReply(state) {
     }
 
     if (result.clarification || state.timeResolution?.clarification) {
-        return `${result.clarification || state.timeResolution.clarification}, sir.`;
+        return `${result.clarification || state.timeResolution.clarification}`;
     }
 
     if (result.status === 'scheduled' && result.type === 'meeting') {
-        return `Booked, sir: ${result.title} [${result.id || 'new'}] at ${result.when}.${result.meetLink ? ` Meet: ${result.meetLink}` : ''}`;
+        return `Booked ${result.title}${result.id ? ` [${result.id}]` : ''} for ${result.when}.${result.meetLink ? ` Meet: ${result.meetLink}` : ''}`;
     }
 
     if (result.status === 'existing' && result.type === 'meeting') {
-        return `Already booked, sir: ${result.title} [${result.id || 'existing'}] at ${result.when}.${result.meetLink ? ` Meet: ${result.meetLink}` : ''}`;
+        return `That meeting is already booked: ${result.title}${result.id ? ` [${result.id}]` : ''} at ${result.when}.${result.meetLink ? ` Meet: ${result.meetLink}` : ''}`;
     }
 
     if (result.status === 'scheduled' && result.type === 'reminder') {
-        return `Reminder set, sir: ${result.text} [${result.id || 'new'}] at ${result.when}.`;
+        return `Reminder set for ${result.when}: ${result.text}${result.id ? ` [${result.id}]` : ''}.`;
     }
 
     if (result.status === 'cancelled') {
         return `Cancelled ${result.meetings || 0} sessions and ${result.reminders || 0} reminders, sir.`;
     }
 
-    if (result.status === 'updated') return `Updated ${result.label || 'it'}, sir${result.when ? `: ${result.when}` : ''}.`;
-    if (result.status === 'completed') return `Marked ${result.label || 'it'} done, sir.`;
+    if (result.status === 'updated') return `Updated ${result.label || 'it'}${result.when ? ` to ${result.when}` : ''}.`;
+    if (result.status === 'completed') return `Marked ${result.label || 'it'} done.`;
     if (result.status === 'listed') {
         const label = result.kind === 'reminder'
             ? 'Active reminders'
@@ -1857,6 +1894,7 @@ async function invokeSchedulingGraph(graph, input) {
 
 module.exports = {
     createSchedulingGraph,
+    deterministicBotReply,
     invokeSchedulingGraph,
     executePlanSequence,
     normalizePlanActions,
