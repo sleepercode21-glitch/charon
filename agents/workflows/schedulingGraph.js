@@ -1310,8 +1310,8 @@ function createSchedulingGraph({ messageStore }) {
                         new HumanMessage(built.payload),
                     ], { json: true, maxOutputTokens: settings.llm.planMaxOutputTokens });
 
-                    logModelUsage('Compound decision', response, built.estimatedTokens);
-                    logJson('Compound raw', response.content);
+                    logModelUsage('Planner decision', response, built.estimatedTokens);
+                    logJson('Planner raw', response.content);
                     const parsed = safeJson(response.content);
                     if (!parsed) throw new Error('invalid_plan_json');
                     const finalPlan = parsed.plan || parsed.final || parsed;
@@ -1320,13 +1320,13 @@ function createSchedulingGraph({ messageStore }) {
                     lastError = error;
                     const canRetrySmaller = error?.status === 413 && attempt < budgets.length - 1;
                     if (!canRetrySmaller) throw error;
-                    logger.warn(`Compound rejected planner payload at estimated=${built.estimatedTokens}; retrying with lean context.`);
+                    logger.warn(`Planner model rejected payload at estimated=${built.estimatedTokens}; retrying with lean context.`);
                 }
             }
 
             throw lastError || new Error('planner_failed');
         } catch (error) {
-            logger.warn('Compound decision failed; command mode remains available.', error);
+            logger.warn('Planner decision failed; command mode remains available.', error);
             return stateFromPlan({
                 state,
                 context,

@@ -143,10 +143,9 @@ GROQ_RESPONSE_API_KEY=...
 
 `MONGODB_URI` stores WhatsApp auth, message context, schedules, reminders, OAuth tokens, and tool state.
 
-`GROQ_API_KEY` remains the backward-compatible shared key and powers the Compound planner by default.
+`GROQ_API_KEY` remains the backward-compatible shared key and powers Groq Llama by default.
 Set `GROQ_PLANNER_API_KEY` to override the planner credential, and set `GROQ_RESPONSE_API_KEY` to
-give the response writer its own independent Groq quota. Purpose-specific keys take precedence over
-the shared key.
+give the response writer its own credential. Purpose-specific keys take precedence over the shared key.
 
 ### WhatsApp
 
@@ -180,53 +179,51 @@ Keep `WHATSAPP_REPLY_MODE=tag_only` if you want Charon to observe all messages b
 ### LLM
 
 ```text
-GROQ_PLANNER_MODEL=groq/compound
-GROQ_RESPONSE_MODEL=qwen/qwen3-32b
+GROQ_PLANNER_MODEL=llama-3.1-8b-instant
+GROQ_RESPONSE_MODEL=llama-3.1-8b-instant
 GROQ_PLANNER_API_KEY=
 GROQ_RESPONSE_API_KEY=
 LLM_MAX_OUTPUT_TOKENS=384
-LLM_MAX_CALL_INPUT_TOKENS=24000
-LLM_PLANNER_MAX_INPUT_TOKENS=2000
-LLM_PLANNER_RETRY_INPUT_TOKENS=1900
-LLM_PLANNER_TOKEN_ESTIMATE_MULTIPLIER=2.5
-LLM_PLANNER_MIN_REQUEST_TOKENS=6500
-LLM_PLANNER_MIN_REQUEST_INTERVAL_MS=20000
+LLM_MAX_CALL_INPUT_TOKENS=60000
+LLM_PLANNER_MAX_INPUT_TOKENS=3500
+LLM_PLANNER_RETRY_INPUT_TOKENS=2500
+LLM_PLANNER_TOKEN_ESTIMATE_MULTIPLIER=1.2
+LLM_PLANNER_MIN_REQUEST_TOKENS=0
+LLM_PLANNER_MIN_REQUEST_INTERVAL_MS=500
 LLM_PLANNER_RATE_LIMIT_COOLDOWN_MS=60000
 LLM_PLAN_MAX_OUTPUT_TOKENS=800
-LLM_RESPONSE_MAX_OUTPUT_TOKENS=1024
+LLM_RESPONSE_MAX_OUTPUT_TOKENS=384
 LLM_MAX_SEQUENCE_ACTIONS=0
 LLM_SEQUENCE_RESPONSE_MAX_STEPS=12
 LLM_MAX_INPUT_TOKENS=10000
-LLM_CONTEXT_TOKEN_BUDGET=6000
+LLM_CONTEXT_TOKEN_BUDGET=3000
 LLM_RESPONSE_CONTEXT_TOKEN_BUDGET=1200
-LLM_MAX_CONTEXT_MESSAGES=30
+LLM_MAX_CONTEXT_MESSAGES=20
 LLM_MAX_CONTEXT_POLLS=8
-LLM_TOKENS_PER_MINUTE=5200
-LLM_REQUESTS_PER_MINUTE=25
-LLM_PLANNER_TOKENS_PER_MINUTE=30000
-LLM_PLANNER_REQUESTS_PER_MINUTE=3
-LLM_RATE_SAFETY_MULTIPLIER=1.35
-LLM_MIN_REQUEST_INTERVAL_MS=1750
+LLM_TOKENS_PER_MINUTE=200000
+LLM_REQUESTS_PER_MINUTE=120
+LLM_PLANNER_TOKENS_PER_MINUTE=200000
+LLM_PLANNER_REQUESTS_PER_MINUTE=120
+LLM_RATE_SAFETY_MULTIPLIER=1.15
+LLM_MIN_REQUEST_INTERVAL_MS=500
 ```
 
-Natural-language mode uses at most two LLM calls. `groq/compound` receives the tagged message, quote, bot clock, pending clarification, recent messages, polls, and active database summaries, then returns one action or an ordered finite sequence. `LLM_MAX_SEQUENCE_ACTIONS=0` removes the application-level step cap; setting it above zero restores a deployment-specific limit. The actual sequence must still fit in the planner model's finite JSON output.
+Natural-language mode uses at most two LLM calls. `llama-3.1-8b-instant` receives the tagged message, quote, bot clock, pending clarification, recent messages, polls, and active database summaries, then returns one action or an ordered finite sequence. `LLM_MAX_SEQUENCE_ACTIONS=0` removes the application-level step cap; setting it above zero restores a deployment-specific limit. The actual sequence must still fit in the planner model's finite JSON output.
 
-Charon preflights the whole sequence, executes steps in order, and can pass nested results such as an earlier Meet link, public id, or listed item into later steps. After local tools run, `qwen/qwen3-32b` normally writes one truthful response. Sequences longer than `LLM_SEQUENCE_RESPONSE_MAX_STEPS` use the deterministic response writer, avoiding another oversized model call. Command mode uses no LLM calls.
+Charon preflights the whole sequence, executes steps in order, and can pass nested results such as an earlier Meet link, public id, or listed item into later steps. After local tools run, `llama-3.1-8b-instant` normally writes one truthful response. Sequences longer than `LLM_SEQUENCE_RESPONSE_MAX_STEPS` use the deterministic response writer, avoiding another model call. Command mode uses no LLM calls.
 
-`LLM_PLANNER_MAX_INPUT_TOKENS` caps the complete Compound request estimate, including the system
-prompt—not just conversation history. If Compound returns HTTP 413, Charon automatically retries once
+`LLM_PLANNER_MAX_INPUT_TOKENS` caps the complete planner request estimate, including the system
+prompt—not just conversation history. If Groq returns HTTP 413, Charon automatically retries once
 using `LLM_PLANNER_RETRY_INPUT_TOKENS` and a leaner context containing fewer messages, polls, and active
 item details. The current request, clock, pending clarification, exact active counts, and reference
 signals are retained.
 
-Compound may reserve substantially more underlying-model capacity than the visible prompt estimate.
-`LLM_PLANNER_TOKEN_ESTIMATE_MULTIPLIER` deliberately inflates local accounting, while
-`LLM_PLANNER_MIN_REQUEST_TOKENS` establishes a conservative floor. The defaults reserve at least
-6,500 tokens before the normal safety multiplier and use the 30K TPM ceiling reported by the
-underlying Scout model. Planner calls are spaced by at least 20 seconds. If Groq still returns 429
-because another process or project consumed the shared organization quota, Charon marks its local
-bucket empty, waits one full 60-second provider window, and retries once. This deliberately trades
-latency for fewer repeated 429 failures.
+The Llama instant path is direct model inference rather than Compound's hidden underlying-model routing,
+so the local token accounting is much less inflated. Planner and response calls have separate credentials
+and separate local buckets even when they use the same model ID. The defaults target the current Groq
+developer-plan `llama-3.1-8b-instant` budget with a safety margin; if Groq still returns 429 because
+another process or project consumed the shared organization quota, Charon marks the local bucket empty,
+waits one provider window, and retries once.
 
 ### Google Meet
 

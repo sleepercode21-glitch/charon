@@ -15,9 +15,17 @@ function estimateMessagesTokens(messages) {
     return messages.reduce((total, message) => total + estimateTokens(langchainContent(message)), 0);
 }
 
-function estimateRequestCapacity({ model, inputTokens, outputTokens }) {
+function isPlannerPurpose(purpose) {
+    return purpose === 'planner';
+}
+
+function rateKeyFor(model, purpose = 'response') {
+    return `${purpose}:${model}`;
+}
+
+function estimateRequestCapacity({ model, inputTokens, outputTokens, purpose = 'response' }) {
     const rawEstimate = inputTokens + outputTokens;
-    if (model !== settings.llm.plannerModel) return rawEstimate;
+    if (!isPlannerPurpose(purpose)) return rawEstimate;
 
     const multiplier = Math.max(settings.llm.plannerTokenEstimateMultiplier || 1, 1);
     const minimum = Math.max(settings.llm.plannerMinRequestTokens || 0, 0);
@@ -47,8 +55,8 @@ function langchainContent(message) {
     return String(content || '');
 }
 
-function rateLimitsFor(model) {
-    const planner = model === settings.llm.plannerModel;
+function rateLimitsFor(model, purpose = 'response') {
+    const planner = isPlannerPurpose(purpose);
     return {
         tokenLimit: Math.max(planner
             ? settings.llm.plannerTokensPerMinute
@@ -59,17 +67,18 @@ function rateLimitsFor(model) {
     };
 }
 
-function minimumRequestIntervalFor(model) {
-    if (model === settings.llm.plannerModel) {
+function minimumRequestIntervalFor(model, purpose = 'response') {
+    if (isPlannerPurpose(purpose)) {
         return Math.max(settings.llm.plannerMinRequestIntervalMs || 0, 0);
     }
     return Math.max(settings.llm.minRequestIntervalMs || 0, 0);
 }
 
-function rateStateFor(model) {
-    if (!rateStates.has(model)) {
-        const limits = rateLimitsFor(model);
-        rateStates.set(model, {
+function rateStateFor(model, purpose = 'response') {
+    const key = rateKeyFor(model, purpose);
+    if (!rateStates.has(key)) {
+        const limits = rateLimitsFor(model, purpose);
+        rateStates.set(key, {
             availableTokens: settings.llm.rateStartFull ? limits.tokenLimit : 0,
             availableRequests: settings.llm.rateStartFull ? limits.requestLimit : 0,
             lastRateRefillAt: Date.now(),
@@ -77,12 +86,12 @@ function rateStateFor(model) {
             queue: Promise.resolve(),
         });
     }
-    return rateStates.get(model);
+    return rateStates.get(key);
 }
 
-function refillRateBuckets(model) {
-    const state = rateStateFor(model);
-    const { tokenLimit, requestLimit } = rateLimitsFor(model);
+function refillRateBuckets(model, purpose = 'response') {
+    const state = rateStateFor(model, purpose);
+    const { tokenLimit, requestLimit } = rateLimitsFor(model, purpose);
     const now = Date.now();
     const elapsed = Math.max(0, now - state.lastRateRefillAt);
     state.lastRateRefillAt = now;
@@ -98,10 +107,10 @@ function refillRateBuckets(model) {
     return state;
 }
 
-async function reserveLlmCapacity({ estimatedTokens, model }) {
-    const { tokenLimit, requestLimit } = rateLimitsFor(model);
-    const state = rateStateFor(model);
-    const minIntervalMs = minimumRequestIntervalFor(model);
+async function reserveLlmCapacity({ estimatedTokens, model, purpose = 'response' }) {
+    const { tokenLimit, requestLimit } = rateLimitsFor(model, purpose);
+    const state = rateStateFor(model, purpose);
+    const minIntervalMs = minimumRequestIntervalFor(model, purpose);
     if (tokenLimit <= 0 && requestLimit <= 0 && minIntervalMs <= 0) {
         return { reservedTokens: 0 };
     }
@@ -113,7 +122,7 @@ async function reserveLlmCapacity({ estimatedTokens, model }) {
         const requestCost = requestLimit > 0 ? 1 : 0;
 
         while (true) {
-            refillRateBuckets(model);
+            refillRateBuckets(model, purpose);
             const tokenReady = tokenLimit <= 0 || state.availableTokens >= tokenCost;
             const requestReady = requestLimit <= 0 || state.availableRequests >= requestCost;
             const intervalWait = minIntervalMs > 0
@@ -146,12 +155,12 @@ async function reserveLlmCapacity({ estimatedTokens, model }) {
     return queued;
 }
 
-function reconcileActualUsage({ actualTokens, reservedTokens, model }) {
-    const { tokenLimit } = rateLimitsFor(model);
+function reconcileActualUsage({ actualTokens, reservedTokens, model, purpose = 'response' }) {
+    const { tokenLimit } = rateLimitsFor(model, purpose);
     if (tokenLimit <= 0 || !Number.isFinite(actualTokens) || actualTokens <= reservedTokens) return;
 
     const extra = actualTokens - reservedTokens;
-    const state = refillRateBuckets(model);
+    const state = refillRateBuckets(model, purpose);
     state.availableTokens = Math.max(0, state.availableTokens - extra);
     logger.info(`LLM rate guard reconciled ${extra} extra tokens for ${model}; actual=${actualTokens}, reserved=${reservedTokens}.`);
 }
@@ -174,16 +183,16 @@ function retryDelayFromGroq({ response, parsed }) {
     return Math.ceil(amount);
 }
 
-function reconcileRejectedRequest({ reservedTokens, model }) {
-    const { tokenLimit } = rateLimitsFor(model);
+function reconcileRejectedRequest({ reservedTokens, model, purpose = 'response' }) {
+    const { tokenLimit } = rateLimitsFor(model, purpose);
     if (tokenLimit <= 0 || !reservedTokens) return;
-    const state = refillRateBuckets(model);
+    const state = refillRateBuckets(model, purpose);
     state.availableTokens = Math.min(tokenLimit, state.availableTokens + reservedTokens);
     logger.info(`LLM rate guard released ${reservedTokens} reserved tokens for failed ${model} request.`);
 }
 
-function markProviderRateLimited(model) {
-    const state = rateStateFor(model);
+function markProviderRateLimited(model, purpose = 'response') {
+    const state = rateStateFor(model, purpose);
     const now = Date.now();
     state.availableTokens = 0;
     state.availableRequests = 0;
@@ -192,7 +201,7 @@ function markProviderRateLimited(model) {
     logger.warn(`LLM rate guard synchronized ${model} to an empty provider window.`);
 }
 
-function createGroqChatModel(model, apiKey) {
+function createGroqChatModel(model, apiKey, purpose = 'response') {
     return {
         async invoke(messages, options = {}) {
             const maxOutputTokens = options.maxOutputTokens || settings.llm.maxOutputTokens;
@@ -205,11 +214,12 @@ function createGroqChatModel(model, apiKey) {
                 model,
                 inputTokens: estimatedInputTokens,
                 outputTokens: maxOutputTokens,
+                purpose,
             });
             if (estimatedRequestTokens > estimatedInputTokens + maxOutputTokens) {
-                logger.info(`Planner capacity overestimate raw=${estimatedInputTokens + maxOutputTokens} guarded=${estimatedRequestTokens}.`);
+                logger.info(`Planner capacity estimate raw=${estimatedInputTokens + maxOutputTokens} guarded=${estimatedRequestTokens}.`);
             }
-            const reservation = await reserveLlmCapacity({ estimatedTokens: estimatedRequestTokens, model });
+            const reservation = await reserveLlmCapacity({ estimatedTokens: estimatedRequestTokens, model, purpose });
             const requestBody = JSON.stringify({
                 model,
                 messages: messages.map((message) => ({
@@ -244,15 +254,15 @@ function createGroqChatModel(model, apiKey) {
                 if (response.ok) break;
 
                 const delayMs = retryDelayFromGroq({ response, parsed });
-                const plannerRateLimit = model === settings.llm.plannerModel && response.status === 429;
+                const plannerRateLimit = isPlannerPurpose(purpose) && response.status === 429;
                 if (plannerRateLimit && !plannerCooldownUsed) {
                     plannerCooldownUsed = true;
-                    markProviderRateLimited(model);
+                    markProviderRateLimited(model, purpose);
                     const cooldownMs = Math.min(Math.max(
                         delayMs,
                         settings.llm.plannerRateLimitCooldownMs || RATE_WINDOW_MS,
                     ), RATE_WINDOW_MS);
-                    logger.warn(`Compound provider window is saturated; cooling down ${Math.ceil(cooldownMs / 1000)}s before one retry.`);
+                    logger.warn(`Planner provider window is saturated; cooling down ${Math.ceil(cooldownMs / 1000)}s before one retry.`);
                     await sleep(cooldownMs);
                     continue;
                 }
@@ -272,6 +282,7 @@ function createGroqChatModel(model, apiKey) {
                     reconcileRejectedRequest({
                         reservedTokens: reservation?.reservedTokens || 0,
                         model,
+                        purpose,
                     });
                 }
                 const error = new Error(`[${response.status} ${response.statusText}] ${body}`);
@@ -294,6 +305,7 @@ function createGroqChatModel(model, apiKey) {
                 actualTokens: result.usage_metadata?.total_tokens,
                 reservedTokens: reservation?.reservedTokens || 0,
                 model,
+                purpose,
             });
 
             return result;
@@ -313,7 +325,7 @@ function createLlmModel(modelOverride = null, purpose = 'response') {
         throw new Error(`${variable} is required for the Groq ${purpose} model.`);
     }
 
-    const instance = createGroqChatModel(model, apiKey);
+    const instance = createGroqChatModel(model, apiKey, purpose);
 
     return {
         async invoke(messages, options) {

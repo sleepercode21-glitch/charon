@@ -4,34 +4,35 @@ const assert = require('node:assert/strict');
 const { settings } = require('../config/settings');
 const { estimateRequestCapacity, minimumRequestIntervalFor } = require('../models/llmWrapper');
 
-test('deliberately overestimates Compound capacity above provider-reported cost', () => {
+test('applies planner-only capacity padding', () => {
     const originalMultiplier = settings.llm.plannerTokenEstimateMultiplier;
     const originalMinimum = settings.llm.plannerMinRequestTokens;
-    settings.llm.plannerTokenEstimateMultiplier = 2.5;
-    settings.llm.plannerMinRequestTokens = 6500;
+    settings.llm.plannerTokenEstimateMultiplier = 1.2;
+    settings.llm.plannerMinRequestTokens = 0;
 
     try {
         assert.equal(estimateRequestCapacity({
             model: settings.llm.plannerModel,
-            inputTokens: 1939,
+            inputTokens: 1600,
             outputTokens: 400,
-        }), 6500);
-        assert.ok(6500 > 5440);
+            purpose: 'planner',
+        }), 2400);
     } finally {
         settings.llm.plannerTokenEstimateMultiplier = originalMultiplier;
         settings.llm.plannerMinRequestTokens = originalMinimum;
     }
 });
 
-test('does not inflate response-model capacity estimates', () => {
+test('does not inflate response capacity even when response uses the same model id', () => {
     assert.equal(estimateRequestCapacity({
         model: settings.llm.responseModel,
         inputTokens: 1200,
         outputTokens: 320,
+        purpose: 'response',
     }), 1520);
 });
 
-test('spaces Compound calls for the effective three-request budget', () => {
-    assert.equal(minimumRequestIntervalFor(settings.llm.plannerModel), 20000);
-    assert.equal(minimumRequestIntervalFor(settings.llm.responseModel), settings.llm.minRequestIntervalMs);
+test('spaces calls by purpose instead of model string', () => {
+    assert.equal(minimumRequestIntervalFor(settings.llm.plannerModel, 'planner'), settings.llm.plannerMinRequestIntervalMs);
+    assert.equal(minimumRequestIntervalFor(settings.llm.responseModel, 'response'), settings.llm.minRequestIntervalMs);
 });

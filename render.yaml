@@ -20,15 +20,15 @@ services:
       - key: GROQ_RESPONSE_API_KEY
         sync: false
       - key: GROQ_PLANNER_MODEL
-        value: groq/compound
+        value: llama-3.1-8b-instant
       - key: GROQ_RESPONSE_MODEL
-        value: qwen/qwen3-32b
+        value: llama-3.1-8b-instant
       - key: LLM_MAX_OUTPUT_TOKENS
         value: "512"
       - key: LLM_PLAN_MAX_OUTPUT_TOKENS
         value: "800"
       - key: LLM_RESPONSE_MAX_OUTPUT_TOKENS
-        value: "1024"
+        value: "384"
       - key: LLM_MAX_SEQUENCE_ACTIONS
         value: "0"
       - key: LLM_SEQUENCE_RESPONSE_MAX_STEPS
@@ -36,27 +36,27 @@ services:
       - key: LLM_MAX_INPUT_TOKENS
         value: "5000"
       - key: LLM_MAX_CALL_INPUT_TOKENS
-        value: "24000"
+        value: "60000"
       - key: LLM_PLANNER_MAX_INPUT_TOKENS
-        value: "2000"
+        value: "3500"
       - key: LLM_PLANNER_RETRY_INPUT_TOKENS
-        value: "1900"
+        value: "2500"
       - key: LLM_PLANNER_TOKEN_ESTIMATE_MULTIPLIER
-        value: "2.5"
+        value: "1.2"
       - key: LLM_PLANNER_MIN_REQUEST_TOKENS
-        value: "6500"
+        value: "0"
       - key: LLM_PLANNER_MIN_REQUEST_INTERVAL_MS
-        value: "20000"
+        value: "500"
       - key: LLM_PLANNER_RATE_LIMIT_COOLDOWN_MS
         value: "60000"
       - key: LLM_CONTEXT_TOKEN_BUDGET
-        value: "1600"
+        value: "3000"
       - key: LLM_MAX_CONTEXT_MESSAGES
-        value: "12"
+        value: "20"
       - key: LLM_PLANNER_TOKENS_PER_MINUTE
-        value: "30000"
+        value: "200000"
       - key: LLM_PLANNER_REQUESTS_PER_MINUTE
-        value: "3"
+        value: "120"
       - key: WHATSAPP_GROUP_SCOPE
         value: all
       - key: WHATSAPP_GROUP_ID

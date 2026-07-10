@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const { compactContext } = require('../utils/tokenBudget');
 const { plannerPayload } = require('../agents/workflows/schedulingGraph');
+const { settings } = require('../config/settings');
 
 function fixtureContext() {
     return {
@@ -151,18 +152,18 @@ test('planner payload trims room context against the total request budget', () =
     const normal = plannerPayload({
         input,
         context,
-        inputTokenBudget: 2000,
-        lean: true,
+        inputTokenBudget: settings.llm.plannerMaxInputTokens,
+        lean: false,
     });
     const lean = plannerPayload({
         input,
         context,
-        inputTokenBudget: 1900,
+        inputTokenBudget: settings.llm.plannerRetryInputTokens,
         lean: true,
     });
 
-    assert.ok(normal.estimatedTokens <= 2000);
-    assert.ok(lean.estimatedTokens <= 1900);
+    assert.ok(normal.estimatedTokens <= settings.llm.plannerMaxInputTokens);
+    assert.ok(lean.estimatedTokens <= settings.llm.plannerRetryInputTokens);
     assert.ok(lean.estimatedTokens < normal.estimatedTokens);
     assert.equal(JSON.parse(normal.payload).msg, 'remind me in 10 minutes');
 });
