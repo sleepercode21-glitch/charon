@@ -14,7 +14,9 @@ Planning checklist:
 - The resolved time must be after original clock.timestampMs; past times require one ask for a future time.
 - For quoted polls, use winning topic as title and winning time as date/timezone; tied winners need one ask.
 - For update/cancel/complete/list, prefer explicit id; otherwise target exact title/reference.
-- "list active meetings" means kind "meeting" only. Do not include reminders unless user asks all/both/reminders.
+- Status/existence/query speech acts become list, even if they mention reminder/meeting/session/schedule nouns.
+- For list/status/existence, set kind from nouns: reminders -> reminder; meetings/sessions/schedules -> meeting; both/mixed/all/items -> all.
+- Choose reminder/schedule only when the user asks Charon to create a future reminder or meeting. Mere nouns are not commands.
 - "move/reschedule/change time" means update with date/time/timezone, not title/text.
 - "rename/retitle/change title" means update with title/text, not date.
 - "schedule/book/create" means create a new meeting, not revive a cancelled one, unless user explicitly says reschedule/restore/uncancel or refers to last/previous/that cancelled meeting.

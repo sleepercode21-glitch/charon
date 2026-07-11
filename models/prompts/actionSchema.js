@@ -24,6 +24,12 @@ Action capabilities:
 - announce: send text to group. Required: text.
 - answer/refuse: conversational response only; no tool side effects.
 
+Intent safeguards:
+- Classify the speech act before matching keywords.
+- Status/existence/query requests use intent list; nouns choose kind, not action.
+- reminder/schedule require a request to create a future reminder/meeting; noun mentions alone are not create commands.
+- For list kind: reminders -> reminder; meetings/sessions/schedules -> meeting; both/mixed/all/items -> all.
+
 Finite workflows:
 - If the user asks for multiple operations, return {"actions":[ACTION,ACTION,...]} in exact order.
 - Later steps may reference earlier tool results with {{previous.id}}, {{previous.meetLink}}, or {{steps.1.id}}.

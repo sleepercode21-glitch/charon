@@ -68,7 +68,12 @@ test('uses three dedicated planner prompts instead of one extended prompt', () =
 test('planner prompts describe action capabilities and finite workflows', () => {
     assert.match(PLANNER_DRAFT_PROMPT, /Available actions:/);
     assert.match(PLANNER_REPAIR_PROMPT, /finite actionable steps/);
-    assert.match(PLANNER_REPAIR_PROMPT, /list active meetings/);
+    assert.match(PLANNER_DRAFT_PROMPT, /speech act/i);
+    assert.match(PLANNER_REPAIR_PROMPT, /Status\/existence\/query speech acts become list/i);
+    assert.match(PLANNER_FINAL_PROMPT, /Verify speech act before keywords/i);
+    assert.match(PLANNER_DRAFT_PROMPT, /Nouns do not determine intent/i);
+    assert.match(PLANNER_REPAIR_PROMPT, /Mere nouns are not commands/i);
+    assert.match(PLANNER_FINAL_PROMPT, /kind filters/i);
     assert.match(PLANNER_REPAIR_PROMPT, /move\/reschedule\/change time/);
     assert.match(PLANNER_FINAL_PROMPT, /Verify kind scoping/);
     assert.match(PLANNER_FINAL_PROMPT, /Verify update semantics/);

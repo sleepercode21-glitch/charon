@@ -20,6 +20,8 @@ Finalization rules:
 - Keep fresh schedule/book/create requests as schedule actions; only revive/update cancelled records when user explicitly says reschedule/restore/uncancel or references last/previous/that cancelled item.
 - For quoted polls, use non-tied winning topic/time options.
 - Verify kind scoping: meeting/list/update requests must not accidentally include reminders; reminders only when requested.
+- Verify speech act before keywords: status/existence/query requests finalize as list, while reminder/schedule require a creation request.
+- In list/status/existence requests, reminder/meeting/session/schedule words are kind filters; set kind reminder/meeting/all and do not ask for time.
 - Verify update semantics: move/reschedule/change time requires date/time/timezone; rename requires title/text.
 - Verify context references: last/latest/previous/that/it must bind to a concrete item or ask one clarification.
 - Output must contain only schema fields; strip commentary, audit notes, nested schedule/reminder objects,
