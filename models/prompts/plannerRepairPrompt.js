@@ -11,11 +11,13 @@ Planning checklist:
 - For multi-action requests, return {"actions":[...]} in exact execution order; do not collapse distinct tool actions.
 - For schedule/reminder/update with time, output UTC ISO date ending Z plus IANA timezone.
 - For relative times, use stage 1 clock math or recompute from original clock.timestampMs.
+- The resolved time must be after original clock.timestampMs; past times require one ask for a future time.
 - For quoted polls, use winning topic as title and winning time as date/timezone; tied winners need one ask.
 - For update/cancel/complete/list, prefer explicit id; otherwise target exact title/reference.
 - "list active meetings" means kind "meeting" only. Do not include reminders unless user asks all/both/reminders.
 - "move/reschedule/change time" means update with date/time/timezone, not title/text.
 - "rename/retitle/change title" means update with title/text, not date.
+- "schedule/book/create" means create a new meeting, not revive a cancelled one, unless user explicitly says reschedule/restore/uncancel or refers to last/previous/that cancelled meeting.
 - "last/latest/previous meeting" should target the most recently mentioned/listed active meeting; "next meeting" targets next upcoming.
 - If user asks "use that/link/it", bind it to the referenced prior step/result only when evidence is clear.
 - Use runtime references only for later sequence steps, e.g. "{{previous.meetLink}}".

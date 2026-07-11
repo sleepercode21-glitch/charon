@@ -115,6 +115,8 @@ function createMessageStore({ mongoose }) {
         meetingCode: String,
         status: { type: String, enum: ['draft', 'scheduled', 'failed', 'completed', 'cancelled'], default: 'draft' },
         failureReason: String,
+        cancelledAt: Date,
+        completedAt: Date,
         remindersSent: [{
             key: String,
             leadMinutes: Number,
@@ -135,6 +137,8 @@ function createMessageStore({ mongoose }) {
         sentAt: Date,
         sentMessageId: String,
         failureReason: String,
+        cancelledAt: Date,
+        completedAt: Date,
         remindersSent: [{
             key: String,
             leadMinutes: Number,
@@ -502,7 +506,7 @@ function createMessageStore({ mongoose }) {
         if (completeReminder) {
             await StandaloneReminder.updateOne(
                 { _id: reminder._id },
-                { $set: { status: 'completed' } },
+                { $set: { status: 'completed', completedAt: new Date() } },
             );
             return {
                 completed: true,
@@ -514,7 +518,7 @@ function createMessageStore({ mongoose }) {
 
         await Meeting.updateOne(
             { _id: meeting._id },
-            { $set: { status: 'completed' } },
+            { $set: { status: 'completed', completedAt: new Date() } },
         );
         return {
             completed: true,
@@ -675,8 +679,12 @@ function createMessageStore({ mongoose }) {
     }
 
     async function markActiveItemsCancelled({ meetingIds = [], reminderIds = [], failureReason }) {
+        const requestedMeetings = meetingIds.length;
+        const requestedReminders = reminderIds.length;
+        const cancelledAt = new Date();
         const update = {
             status: 'cancelled',
+            cancelledAt,
             ...(failureReason ? { failureReason } : {}),
         };
 
@@ -699,6 +707,14 @@ function createMessageStore({ mongoose }) {
             cancelled: meetings.modifiedCount + reminders.modifiedCount,
             meetings: meetings.modifiedCount,
             reminders: reminders.modifiedCount,
+            requested: requestedMeetings + requestedReminders,
+            requestedMeetings,
+            requestedReminders,
+            skipped: requestedMeetings + requestedReminders - meetings.modifiedCount - reminders.modifiedCount,
+            skippedMeetings: requestedMeetings - meetings.modifiedCount,
+            skippedReminders: requestedReminders - reminders.modifiedCount,
+            terminalStatus: 'cancelled',
+            cancelledAt,
         };
     }
 

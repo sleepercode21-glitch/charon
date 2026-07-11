@@ -63,7 +63,17 @@ async function scheduleMeeting({ decision, timeResolution, context, chat, trigge
         triggerMessage._data?.body,
         triggerMessage._data?.caption,
     ].filter(Boolean).join(' ');
-    if (start.getTime() <= Date.now() + 30 * 1000 && !explicitlyImmediate(triggerText)) {
+    const nowMs = Date.now();
+    if (start.getTime() < nowMs - 1000) {
+        return {
+            status: 'failed',
+            need: 'meeting_time',
+            clarification: 'That meeting time is in the past. Send me a future date and time.',
+            reason: 'past_time',
+        };
+    }
+
+    if (start.getTime() <= nowMs + 30 * 1000 && !explicitlyImmediate(triggerText)) {
         return {
             status: 'failed',
             need: 'meeting_time',

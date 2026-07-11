@@ -1,6 +1,10 @@
 const { settings } = require('../../config/settings');
 const { extractTimezone, formatForChat, normalizeTimezone, parseDate } = require('../../utils/time');
 
+function explicitlyImmediate(text) {
+    return /\b(now|right now|asap|immediately|in 0\s*(m|min|minute|h|hour)s?)\b/i.test(String(text || ''));
+}
+
 async function createStandaloneReminder({ decision, timeResolution, chat, triggerMessage, messageStore }) {
     if (timeResolution?.status === 'needs_clarification') {
         return {
@@ -23,6 +27,31 @@ async function createStandaloneReminder({ decision, timeResolution, chat, trigge
             status: 'failed',
             need: 'reminder_time',
             reason: 'No resolvable reminder time.',
+        };
+    }
+
+    const triggerText = [
+        triggerMessage.body,
+        triggerMessage.caption,
+        triggerMessage._data?.body,
+        triggerMessage._data?.caption,
+    ].filter(Boolean).join(' ');
+    const nowMs = Date.now();
+    if (dueAt.getTime() < nowMs - 1000) {
+        return {
+            status: 'failed',
+            need: 'reminder_time',
+            clarification: 'That reminder time is in the past. Send me a future date and time.',
+            reason: 'past_time',
+        };
+    }
+
+    if (dueAt.getTime() <= nowMs + 30 * 1000 && !explicitlyImmediate(triggerText)) {
+        return {
+            status: 'failed',
+            need: 'reminder_time',
+            clarification: 'I found no future time for that reminder. What day and time should I use?',
+            reason: 'Refused to schedule an implicit immediate reminder.',
         };
     }
 

@@ -16,6 +16,8 @@ Finalization rules:
 - Resolve runtime references only when they are explicitly needed, e.g. {{previous.meetLink}}.
 - For mutating actions, never proceed if an essential detail is absent; ask exactly one question.
 - For relative durations, use current backend/computer time from clock, not WhatsApp message age.
+- Reject past resolved times for schedule/reminder/update; ask for a future date/time instead of emitting an executable action.
+- Keep fresh schedule/book/create requests as schedule actions; only revive/update cancelled records when user explicitly says reschedule/restore/uncancel or references last/previous/that cancelled item.
 - For quoted polls, use non-tied winning topic/time options.
 - Verify kind scoping: meeting/list/update requests must not accidentally include reminders; reminders only when requested.
 - Verify update semantics: move/reschedule/change time requires date/time/timezone; rename requires title/text.

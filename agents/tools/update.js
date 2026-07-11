@@ -30,8 +30,8 @@ function chooseRelativeActiveItem(items, target) {
 
 function canReviveCancelledMeeting(update, target) {
     const text = [target, update?.text, update?.description, update?.title].filter(Boolean).join(' ');
-    return /\b(last|cancelled|canceled|previous|it|that|meet|meeting|session)\b/i.test(text)
-        || /\breschedule\b/i.test(text);
+    return /\b(last|latest|cancelled|canceled|previous|it|that)\b/i.test(text)
+        || /\b(reschedule|restore|revive|uncancel)\b/i.test(text);
 }
 
 function resolvedDate(timeResolution, fallback, timezone) {
@@ -42,6 +42,20 @@ function resolvedDate(timeResolution, fallback, timezone) {
 function resolvedEndDate(timeResolution, fallback, timezone) {
     const resolved = timeResolution?.status === 'resolved' ? timeResolution.end : null;
     return parseDate(resolved, new Date(), timezone) || parseDate(fallback, new Date(), timezone);
+}
+
+function pastTimeFailure(need) {
+    return {
+        status: 'failed',
+        type: 'update',
+        need,
+        clarification: 'That time is in the past. Send me a future date and time.',
+        reason: 'past_time',
+    };
+}
+
+function isPastDate(date) {
+    return date && date.getTime() < Date.now() - 1000;
 }
 
 async function updateActiveItem({ decision, timeResolution, chat, messageStore }) {
@@ -84,6 +98,8 @@ async function updateActiveItem({ decision, timeResolution, chat, messageStore }
                     need: 'new_meeting_time',
                 };
             }
+
+            if (isPastDate(start)) return pastTimeFailure('new_meeting_time');
 
             const result = await messageStore.rescheduleLatestCancelledMeeting({
                 chatId,
@@ -150,6 +166,8 @@ async function updateActiveItem({ decision, timeResolution, chat, messageStore }
             };
         }
 
+        if (requestedTimeChange && isPastDate(dueAt)) return pastTimeFailure('new_reminder_time');
+
         const result = await messageStore.updateActiveItem({
             chatId,
             target: resolvedTarget,
@@ -200,6 +218,8 @@ async function updateActiveItem({ decision, timeResolution, chat, messageStore }
             need: 'new_meeting_time',
         };
     }
+
+    if (requestedTimeChange && isPastDate(start)) return pastTimeFailure('new_meeting_time');
 
     const previousStart = new Date(active.item.start);
     const previousEnd = new Date(active.item.end);

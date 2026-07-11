@@ -39,6 +39,8 @@ Rules:
 - For "last/latest/previous", prefer the most recently mentioned/listed matching item; for "next", prefer next upcoming.
 - If user says "active meetings", "meetings", "sessions", or "schedules", reference kind=meeting only, not reminders.
 - For "in N minutes/hours/days", compute resolvedUtc from clock.timestampMs.
+- For any schedule/reminder/update time, resolvedUtc must be after clock.timestampMs; otherwise mark missing future time.
+- A fresh "schedule/book/create" request means create a new active meeting. Do not treat it as an update/revive just because a cancelled meeting exists.
 - Mark poll winners/ties, active ids/titles, pending asks, and exact user wording as references.
 - If a request refers to context implicitly, name the strongest evidence and any ambiguity.
 - Keep notes practical: exact finite steps, target references, time interpretation, what to avoid, and what to ask.

@@ -1583,7 +1583,11 @@ function deterministicBotReply(state) {
     }
 
     if (result.status === 'cancelled') {
-        return `Cancelled ${result.meetings || 0} sessions and ${result.reminders || 0} reminders, sir.`;
+        const skipped = (result.skippedMeetings || 0) + (result.skippedReminders || 0);
+        const detail = skipped > 0
+            ? ` ${skipped} matched item${skipped === 1 ? ' was' : 's were'} already inactive or could not be changed.`
+            : '';
+        return `Cancelled ${result.meetings || 0} sessions and ${result.reminders || 0} reminders, sir.${detail}`;
     }
 
     if (result.status === 'updated') return `Updated ${result.label || 'it'}${result.when ? ` to ${result.when}` : ''}.`;
@@ -1607,6 +1611,7 @@ function deterministicBotReply(state) {
     if (result.status === 'announced') return 'Tagged everyone, sir.';
     if (result.status === 'nothing_to_cancel') return 'Nothing active matched, sir.';
     if (result.status === 'failed') {
+        if (result.reason === 'past_time') return 'That time is in the past, sir. Send me a future date and time.';
         if (result.need === 'meeting_time') return 'I need the meeting date, time, and timezone, sir.';
         if (result.need === 'reminder_time') return 'I need the reminder date, time, and timezone, sir.';
         if (result.need === 'new_time' || result.need === 'new_meeting_time' || result.need === 'new_reminder_time') {

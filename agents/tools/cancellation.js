@@ -201,6 +201,12 @@ async function cancelActiveItem({ decision, chat, messageStore }) {
         type: 'cancellation',
         meetings: result.meetings,
         reminders: result.reminders,
+        requestedMeetings: result.requestedMeetings || meetingIds.length,
+        requestedReminders: result.requestedReminders || reminderIds.length,
+        skippedMeetings: result.skippedMeetings || 0,
+        skippedReminders: result.skippedReminders || 0,
+        terminalStatus: result.terminalStatus || 'cancelled',
+        cancelledAt: result.cancelledAt || null,
         items: items.map(cancelledItemSummary),
     };
 }
